@@ -1506,6 +1506,25 @@ const char * const vmstat_text[] = {
 	[I(PGHOT_RECORD_HWHINTS)]		= "pghot_recorded_hwhints",
 	[I(PGHOT_RECORD_PGTSCANS)]		= "pghot_recorded_pgtscans",
 	[I(PGHOT_RECORD_HINTFAULTS)]		= "pghot_recorded_hintfaults",
+#ifdef CONFIG_HWMEM_PROFILER
+	[I(HWHINT_NR_EVENTS)]			= "hwhint_nr_events",
+	[I(HWHINT_KERNEL)]			= "hwhint_kernel",
+	[I(HWHINT_KTHREAD)]			= "hwhint_kthread",
+	[I(HWHINT_NON_LOAD_STORES)]		= "hwhint_non_load_stores",
+	[I(HWHINT_DC_L2_HITS)]			= "hwhint_dc_l2_hits",
+	[I(HWHINT_LOCAL_L3L1L2)]		= "hwhint_local_l3l1l2",
+	[I(HWHINT_LOCAL_PEER_CACHE_NEAR)]	= "hwhint_local_peer_cache_near",
+	[I(HWHINT_FAR_CACHE_HITS)]		= "hwhint_far_cache_hits",
+	[I(HWHINT_DRAM_ACCESSES)]		= "hwhint_dram_accesses",
+	[I(HWHINT_CXL_ACCESSES)]		= "hwhint_cxl_accesses",
+	[I(HWHINT_REMOTE_NODE)]			= "hwhint_remote_node",
+	[I(HWHINT_LADDR_INVALID)]		= "hwhint_invalid_laddr",
+	[I(HWHINT_KERNEL_ADDR)]			= "hwhint_kernel_addr",
+	[I(HWHINT_PADDR_INVALID)]		= "hwhint_invalid_paddr",
+	[I(HWHINT_NON_LRU)]			= "hwhint_non_lru",
+	[I(HWHINT_BUFFER_FULL)]			= "hwhint_buffer_full",
+	[I(HWHINT_USEFUL_SAMPLES)]		= "hwhint_useful_samples",
+#endif /* CONFIG_HWMEM_PROFILER */
 #endif /* CONFIG_PGHOT */
 #undef I
 #endif /* CONFIG_VM_EVENT_COUNTERS */

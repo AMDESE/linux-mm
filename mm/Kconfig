@@ -1489,6 +1489,19 @@ config PGHOT_PRECISE
 	  4 bytes per page against the default one byte per page. Preferable
 	  to enable this on systems with multiple nodes in toptier.
 
+config HWMEM_PROFILER
+	bool "HW based memory access profiling"
+	def_bool n
+	depends on PGHOT
+	depends on X86_64
+	help
+	  Some hardware platforms are capable of providing memory access
+	  information in direct and actionable manner. Instruction Based
+	  Sampling (IBS) present on AMD Zen CPUs in one such example.
+	  Memory accesses obtained via such HW based mechanisms are
+	  rolled up to PGHOT sub-system for further action like hot page
+	  promotion or NUMA Balancing
+
 source "mm/damon/Kconfig"
 
 endmenu
