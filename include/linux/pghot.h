@@ -2,6 +2,14 @@
 #ifndef _LINUX_PGHOT_H
 #define _LINUX_PGHOT_H
 
+#include <linux/types.h>
+
+#ifdef CONFIG_HWMEM_PROFILER
+bool hwmem_access_profiler_inuse(void);
+#else
+static inline bool hwmem_access_profiler_inuse(void) { return false; }
+#endif
+
 /* Page hotness temperature sources */
 enum pghot_src {
 	PGHOT_HW_HINTS,
