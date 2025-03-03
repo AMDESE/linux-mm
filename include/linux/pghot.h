@@ -6,8 +6,12 @@
 
 #ifdef CONFIG_HWMEM_PROFILER
 bool hwmem_access_profiler_inuse(void);
+void hwmem_access_profiling_start(void);
+void hwmem_access_profiling_stop(void);
 #else
 static inline bool hwmem_access_profiler_inuse(void) { return false; }
+static inline void hwmem_access_profiling_start(void) {}
+static inline void hwmem_access_profiling_stop(void) {}
 #endif
 
 /* Page hotness temperature sources */
