@@ -1494,6 +1494,15 @@ const char * const vmstat_text[] = {
 	[I(KSTACK_REST)]			= "kstack_rest",
 #endif
 #endif
+	[I(PGHOT_RECORDED_ACCESSES)]		= "pghot_recorded_accesses",
+	[I(PGHOT_RECORD_HWHINTS)]		= "pghot_recorded_hwhints",
+	[I(PGHOT_RECORD_PGTSCANS)]		= "pghot_recorded_pgtscans",
+	[I(PGHOT_RECORDS_HASH)]			= "pghot_records_hash",
+	[I(PGHOT_RECORDS_HEAP)]			= "pghot_records_heap",
+	[I(KPROMOTED_RIGHT_NODE)]		= "kpromoted_right_node",
+	[I(KPROMOTED_NON_LRU)]			= "kpromoted_non_lru",
+	[I(KPROMOTED_COLD_OLD)]			= "kpromoted_cold_old",
+	[I(KPROMOTED_DROPPED)]			= "kpromoted_dropped",
 #undef I
 #endif /* CONFIG_VM_EVENT_COUNTERS */
 };
