@@ -15,10 +15,36 @@
 #include <linux/migrate.h>
 #include <linux/migrate_offc.h>
 
-#define MAX_NUM_COPY_THREADS 64
+#define MAX_NUM_COPY_THREADS 32
 
 unsigned int limit_mt_num = 4;
 static int is_dispatching;
+
+static int cpuselect = 0;
+
+// spread across die
+static const int cpu_id_list_0[] =
+	{0, 8, 16, 24,
+	32, 40, 48, 56,
+	64, 72, 80, 88,
+	96, 104, 112, 120,
+	128, 136, 144, 152,
+	160, 168, 176, 184,
+	192, 200, 208, 216,
+	224, 232, 240, 248};
+
+// don't spread, fill the die
+static const int cpu_id_list_1[] =
+	{0, 1, 2, 3,
+	4, 5, 6, 7,
+	8, 9, 10, 11,
+	12, 13, 14, 15,
+	16, 17, 18, 19,
+	20, 21, 22, 23,
+	24, 25, 26, 27,
+	28, 29, 30, 31};
+
+int cpu_id_list[32] = {0};
 
 static int copy_page_lists_mt(struct list_head *dst_folios,
 		struct list_head *src_folios, int nr_items);
@@ -143,6 +169,40 @@ static ssize_t mt_threads_show(struct kobject *kobj,
 	return sysfs_emit(buf, "%u\n", limit_mt_num);
 }
 
+static ssize_t mt_cpuselect_set(struct kobject *kobj, struct kobj_attribute *attr,
+		const char *buf, size_t count)
+{
+	int ccode;
+	unsigned int cpuconfig;
+
+	ccode = kstrtouint(buf, 0, &cpuconfig);
+	if (ccode) {
+		pr_debug("(%s:) error parsing input %s\n", __func__, buf);
+		return ccode;
+	}
+	mutex_lock(&migratecfg_mutex);
+	cpuselect = cpuconfig;
+	switch (cpuselect) {
+	case 1:
+		memcpy(cpu_id_list, cpu_id_list_1, MAX_NUM_COPY_THREADS*sizeof(int));
+		break;
+	default:
+		memcpy(cpu_id_list, cpu_id_list_0, MAX_NUM_COPY_THREADS*sizeof(int));
+		break;
+	}
+
+	mutex_unlock(&migratecfg_mutex);
+
+	return count;
+}
+
+
+static ssize_t mt_cpuselect_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%u\n", cpuselect);
+}
+
 static bool can_migrate_mt(struct folio *dst, struct folio *src)
 {
 	return true;
@@ -218,7 +278,7 @@ int copy_page_lists_mt(struct list_head *dst_folios,
 		}
 
 		for (cpu = 0; cpu < total_mt_num; ++cpu)
-			queue_work(system_unbound_wq,
+			queue_work_on(cpu_id_list[cpu], system_unbound_wq,
 				   (struct work_struct *)work_items[cpu]);
 	} else {
 		int num_xfer_per_thread = nr_items / total_mt_num;
@@ -255,7 +315,7 @@ int copy_page_lists_mt(struct list_head *dst_folios,
 			dst2 = list_next_entry(dst, lru);
 
 			if (per_cpu_item_idx == work_items[cpu]->num_items) {
-				queue_work(system_unbound_wq,
+				queue_work_on(cpu_id_list[cpu], system_unbound_wq,
 					(struct work_struct *)work_items[cpu]);
 				per_cpu_item_idx = 0;
 				cpu++;
@@ -286,6 +346,8 @@ static struct kobj_attribute mt_offloading_attribute = __ATTR(offloading, 0664,
 		mt_offloading_show, mt_offloading_set);
 static struct kobj_attribute mt_threads_attribute = __ATTR(threads, 0664,
 		mt_threads_show, mt_threads_set);
+static struct kobj_attribute mt_cpuselect_attribute = __ATTR(cpuselect, 0664,
+		mt_cpuselect_show, mt_cpuselect_set);
 
 static int __init cpu_mt_module_init(void)
 {
@@ -303,10 +365,18 @@ static int __init cpu_mt_module_init(void)
 	if (ret)
 		goto out_threads;
 
+	ret = sysfs_create_file(mt_kobj_ref, &mt_cpuselect_attribute.attr);
+	if (ret)
+		goto out_cpuselect;
+
+	memcpy(cpu_id_list, cpu_id_list_0, MAX_NUM_COPY_THREADS*sizeof(int));
+
 	is_dispatching = 0;
 
 	return 0;
 
+out_cpuselect:
+	sysfs_remove_file(mt_kobj_ref, &mt_threads_attribute.attr);
 out_threads:
 	sysfs_remove_file(mt_kobj_ref, &mt_offloading_attribute.attr);
 out_offloading:
@@ -324,6 +394,7 @@ static void __exit cpu_mt_module_exit(void)
 	}
 	mutex_unlock(&migratecfg_mutex);
 
+	sysfs_remove_file(mt_kobj_ref, &mt_cpuselect_attribute.attr);
 	sysfs_remove_file(mt_kobj_ref, &mt_threads_attribute.attr);
 	sysfs_remove_file(mt_kobj_ref, &mt_offloading_attribute.attr);
 	kobject_put(mt_kobj_ref);
