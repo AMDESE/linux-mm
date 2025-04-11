@@ -113,6 +113,7 @@ static inline void softleaf_entry_wait_on_locked(softleaf_t entry, spinlock_t *p
 int migrate_misplaced_folio_prepare(struct folio *folio,
 		struct vm_area_struct *vma, int node);
 int migrate_misplaced_folio(struct folio *folio, int node);
+int promote_misplaced_memcg_folios(struct list_head *folio_list, int node);
 #else
 static inline int migrate_misplaced_folio_prepare(struct folio *folio,
 		struct vm_area_struct *vma, int node)
@@ -120,6 +121,10 @@ static inline int migrate_misplaced_folio_prepare(struct folio *folio,
 	return -EAGAIN; /* can't migrate now */
 }
 static inline int migrate_misplaced_folio(struct folio *folio, int node)
+{
+	return -EAGAIN; /* can't migrate now */
+}
+static inline int promote_misplaced_memcg_folios(struct list_head *folio_list, int node)
 {
 	return -EAGAIN; /* can't migrate now */
 }
