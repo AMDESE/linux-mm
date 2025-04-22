@@ -60,6 +60,32 @@ struct movable_operations {
 /* Defined in mm/debug.c: */
 extern const char *migrate_reason_names[MR_TYPES];
 
+/**
+ * folio_migrate_expected_refs - Count expected references for an unmapped folio.
+ * @mapping: The address space the folio belongs to.
+ * @folio: The folio to check.
+ *
+ * Calculate the expected reference count for a folio during migration.
+ * This function is only suitable for folios that are unmapped from page tables
+ * (i.e., no references from page table mappings: !folio_mapped()).
+ *
+ * Return: The expected reference count
+ */
+static inline int folio_migration_expected_refs(struct address_space *mapping,
+		struct folio *folio)
+{
+	int refs = 1;
+
+	if (!mapping)
+		return refs;
+
+	refs += folio_nr_pages(folio);
+	if (folio_test_private(folio))
+		refs++;
+
+	return refs;
+}
+
 #ifdef CONFIG_MIGRATION
 
 void putback_movable_pages(struct list_head *l);
