@@ -1,0 +1,215 @@
+[PATCH RFC V2 0/9] Enhancements to Page Migration with Multi-threading and Batch Offloading to DMA
+Date: Wed, 19 Mar 2025 19:22:03 +0000	[thread overview]
+Message-ID: <20250319192211.10092-1-shivankg@amd.com> (raw)
+
+This patchset introduces enhancements to the page migration by batching
+folio-copy operations and using multiple CPU threads for copying or offloading
+the copy to DMA hardware.
+
+It builds upon Zi's work on accelerating page migration via multi-threading[1]
+and my previous work on enhancing page migration with batch offloading via DMA[2].
+
+MOTIVATION:
+-----------
+Page migration costs have become increasingly critical in modern systems with
+memory-tiers and NUMA nodes:
+
+1. Batching folio copies increases throughput, especially for base page migrations
+where kernel activities (moving folio metadata, updating page table entries) create
+overhead between individual copies. This is particularly important for smaller
+page-sizes (4KB on x86_64/ARM64, 64KB on ARM64).
+
+2. Current simple serial copy patterns underutilize modern hardware capabilities,
+leaving memory migration bandwidth capped by single-threaded CPU-bound operations.
+
+These improvements are particularly valuable in:
+- Large-scale tiered-memory systems with CXL nodes and HBM
+- CPU-GPU coherent systems with GPU memory exposed as NUMA nodes
+- Systems where frequent page promotion/demotion occurs
+
+Following the trend of batching operations in the memory migration core path (batch
+migration, batch TLB flush), batch copying folio content is the logical next step.
+Modern systems equipped with powerful hardware accelerators (DMA engines), GPUs, and
+high CPU core counts offer untapped potential for hardware acceleration.
+
+DESIGN:
+-------
+The patchset implements three key enhancements:
+
+1. Batching:
+- Current approach: Process each folio individually
+  for_each_folio() {
+    Copy folio metadata like flags and mappings
+    Copy the folio content from src to dst
+    Update page tables with dst folio
+  }
+
+- New approach: Process in batches
+  for_each_folio() {
+    Copy folio metadata like flags and mappings
+  }
+  Batch copy all src folios to dst
+  for_each_folio() {
+    Update page tables with dst folios
+  }
+
+2. Multi-Threading:
+- Distribute folio batch copy operations across multiple CPU threads.
+
+3. DMA Offload:
+- Leverage DMA engines designed for high copy throughput.
+- Distribute folio batch-copy across mutliple DMA channels.
+
+PERFORMANCE RESULTS:
+-------------------
+System Info:
+Testing environment: AMD Zen 3 EPYC server (2-sockets, 32 cores, SMT Enabled),
+1 NUMA node per socket, Linux Kernel 6.14.0-rc7+, DVFS set to Performance,
+PTDMA hardware.
+
+Measurement: Throughput (GB/s)
+
+
+1. Varying folio-size with different parallel threads/channels:
+
+Move different sized folios (mTHP - 4KB, 16KB,..., 2MB) such that total transfer
+size is constant (1GB), with different number of parallel threads/channels.
+
+a. Multi-Threaded CPU
+
+	   Folio Size-->
+Thread Cnt | 4K   |    16K   |    32K   |   64K    |   128K   |   256K   |   512K     |    1M     |    2M     |
+===============================================================================================================
+1      | 1.72±0.05| 3.55±0.14| 4.44±0.07| 5.19±0.37| 5.57±0.47| 6.27±0.02 | 6.43±0.09 | 6.59±0.05 | 10.73±0.07|
+2      | 1.93±0.06| 3.91±0.24| 5.22±0.03| 5.76±0.62| 7.42±0.16| 7.30±0.93 | 8.08±0.85 | 8.67±0.09 | 17.21±0.28|
+4      | 2.00±0.03| 4.30±0.22| 6.02±0.10| 7.61±0.26| 8.60±0.92| 9.54±1.11 | 10.03±1.12| 10.98±0.14| 29.61±0.43|
+8      | 2.07±0.08| 4.60±0.32| 6.06±0.85| 7.52±0.96| 7.98±1.83| 8.66±1.94 | 10.99±1.40| 11.22±1.49| 37.42±0.70|
+16     | 2.04±0.04| 4.74±0.31| 6.20±0.39| 7.51±0.86| 8.26±1.47| 10.99±0.11| 9.72±1.51 | 12.07±0.02| 37.08±0.53|
+
+b. DMA Offload
+
+	   Folio Size-->
+Channel Cnt| 4K   |   16K    |   32K    |    64K   |   128K   |   256K   |    512K  |   1M     |    2M     |
+============================================================================================================
+1      | 0.46±0.01| 1.35±0.02| 1.99±0.02| 2.76±0.02| 3.44±0.17| 3.87±0.20| 3.98±0.29| 4.36±0.01| 11.79±0.05|
+2      | 0.66±0.02| 1.84±0.07| 2.89±0.10| 4.02±0.30| 4.27±0.53| 5.98±0.05| 6.15±0.50| 5.83±0.64| 13.39±0.08|
+4      | 0.91±0.01| 2.62±0.13| 3.98±0.17| 5.57±0.41| 6.55±0.70| 8.32±0.04| 8.91±0.05| 8.82±0.96| 24.52±0.22|
+8      | 1.14±0.00| 3.21±0.07| 4.21±1.09| 6.07±0.81| 8.80±0.08| 8.91±1.38|11.03±0.02|10.68±1.38| 39.17±0.58|
+16     | 1.19±0.11| 3.33±0.20| 4.98±0.33| 7.65±0.10| 7.85±1.50| 8.38±1.35| 8.94±3.23|12.85±0.06| 55.45±1.20|
+
+Inference:
+- Throughput increases with folio size. Higher Size folios benefit more from DMA.
+- Multi-threading and DMA offloading both provide significant gains.
+
+
+2. Varying folio count (total transfer size)
+2MB folio-size, use only 1 thread
+
+a. CPU Multi-Threaded
+Folio Count| GB/s
+======================
+1          | 7.56±3.23
+8          | 9.54±1.34
+64         | 9.57±0.39
+256        | 10.09±0.17
+512        | 10.61±0.17
+1024       | 10.77±0.07
+2048       | 10.81±0.08
+8192       | 10.84±0.05
+
+b. DMA offload
+Folio Count| GB/s
+======================
+1          | 8.21±3.68
+8          | 9.92±2.12
+64         | 9.90±0.31
+256        | 11.51±0.32
+512        | 11.67±0.11
+1024       | 11.89±0.06
+2048       | 11.92±0.08
+8192       | 12.03±0.05
+
+Inference:
+- Throughput increase with folios count but plateaus after a threshold.
+  (The migrate_pages function uses a folio batch size of 512)
+
+3. CPU Threads scheduling
+Analyze effect of CPU topology
+
+a. Spread Across different CCDs
+ Threads    | GB/s
+========================
+ 1          | 10.60±0.06
+ 2          | 17.21±0.12
+ 4          | 29.94±0.16
+ 8          | 37.07±1.62
+ 16         | 36.19±0.97
+
+b. Fill one CCD completely before moving to next one
+ Threads    | GB/s
+========================
+ 1          | 10.44±0.47
+ 2          | 10.93±0.11
+ 4          | 10.99±0.04
+ 8          | 11.08±0.03
+ 16         | 17.91±0.12
+
+Inference:
+- Hardware topology matters. On AMD systems, distributing copy threads across
+  CCDs utilizes bandwidth better
+
+TODOs:
+We can further experiments to:
+- Characterize system behavior and develop heuristics
+- Analyze remote/local CPU scheduling impacts
+- Measure DMA setup overheads
+- Evaluate costs to userspace
+- Study cache hotness/pollution effects
+- DMA cost with different system I/O load
+
+[1] https://lore.kernel.org/linux-mm/20250103172419.4148674-1-ziy@nvidia.com
+[2] https://lore.kernel.org/linux-mm/20240614221525.19170-1-shivankg@amd.com
+[3] LSFMM Proposal: https://lore.kernel.org/all/cf6fc05d-c0b0-4de3-985e-5403977aa3aa@amd.com
+
+Mike Day (1):
+  mm: add support for copy offload for folio Migration
+
+Shivank Garg (4):
+  mm: batch folio copying during migration
+  mm/migrate: add migrate_folios_batch_move to batch the folio move
+    operations
+  dcbm: add dma core batch migrator for batch page offloading
+  mtcopy: spread threads across die for testing
+
+Zi Yan (4):
+  mm/migrate: factor out code in move_to_new_folio() and
+    migrate_folio_move()
+  mm/migrate: revive MIGRATE_NO_COPY in migrate_mode.
+  mm/migrate: introduce multi-threaded page copy routine
+  adjust NR_MAX_BATCHED_MIGRATION for testing
+
+ drivers/Kconfig                        |   2 +
+ drivers/Makefile                       |   3 +
+ drivers/migoffcopy/Kconfig             |  17 ++
+ drivers/migoffcopy/Makefile            |   2 +
+ drivers/migoffcopy/dcbm/Makefile       |   1 +
+ drivers/migoffcopy/dcbm/dcbm.c         | 393 ++++++++++++++++++++++++
+ drivers/migoffcopy/mtcopy/Makefile     |   1 +
+ drivers/migoffcopy/mtcopy/copy_pages.c | 408 +++++++++++++++++++++++++
+ include/linux/migrate_mode.h           |   2 +
+ include/linux/migrate_offc.h           |  36 +++
+ include/linux/mm.h                     |   4 +
+ mm/Kconfig                             |   8 +
+ mm/Makefile                            |   1 +
+ mm/migrate.c                           | 351 ++++++++++++++++++---
+ mm/migrate_offc.c                      |  51 ++++
+ mm/util.c                              |  41 +++
+ 16 files changed, 1275 insertions(+), 46 deletions(-)
+ create mode 100644 drivers/migoffcopy/Kconfig
+ create mode 100644 drivers/migoffcopy/Makefile
+ create mode 100644 drivers/migoffcopy/dcbm/Makefile
+ create mode 100644 drivers/migoffcopy/dcbm/dcbm.c
+ create mode 100644 drivers/migoffcopy/mtcopy/Makefile
+ create mode 100644 drivers/migoffcopy/mtcopy/copy_pages.c
+ create mode 100644 include/linux/migrate_offc.h
+ create mode 100644 mm/migrate_offc.c
