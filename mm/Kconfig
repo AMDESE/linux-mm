@@ -1372,6 +1372,17 @@ config PT_RECLAIM
 config FIND_NORMAL_PAGE
 	def_bool n
 
+config PGHOT
+	bool "Hot page tracking and promotion"
+	def_bool y
+	depends on NUMA && MIGRATION && SPARSEMEM && MMU
+	help
+	  A sub-system to track page accesses in lower tier memory and
+	  maintain hot page information. Promotes hot pages from lower
+	  tiers to top tier by using the memory access information provided
+	  by various sources. Asynchronous promotion is done by per-node
+	  kernel threads.
+
 source "mm/damon/Kconfig"
 
 endmenu
