@@ -47,6 +47,8 @@ enum pghot_src {
 #define PGHOT_HEAP_PCT		25
 
 #define KPROMOTED_MIGRATE_BATCH	1024
+#define KPROMOTED_MIGRATION_ADJUST_STEPS	16
+#define KPROMOTED_PROMOTION_THRESHOLD_WINDOW	60000
 
 /*
  * If target NID isn't available, kpromoted promotes to node 0

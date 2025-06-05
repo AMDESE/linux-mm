@@ -9,6 +9,9 @@
  *
  * kpromoted is a kernel thread that runs on each toptier node and
  * promotes pages from max_heap.
+ *
+ * Migration rate-limiting and dynamic threshold logic implementations
+ * were moved from NUMA Balancing mode 2.
  */
 #include <linux/pghot.h>
 #include <linux/kthread.h>
@@ -34,6 +37,9 @@ static bool kpromoted_started __ro_after_init;
 
 static unsigned int sysctl_pghot_freq_window = KPROMOTED_FREQ_WINDOW;
 
+/* Restrict the NUMA promotion throughput (MB/s) for each target node. */
+static unsigned int sysctl_pghot_promote_rate_limit = 65536;
+
 #ifdef CONFIG_SYSCTL
 static const struct ctl_table pghot_sysctls[] = {
 	{
@@ -44,8 +50,17 @@ static const struct ctl_table pghot_sysctls[] = {
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= SYSCTL_ZERO,
 	},
+	{
+		.procname	= "pghot_promote_rate_limit_MBps",
+		.data		= &sysctl_pghot_promote_rate_limit,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+	},
 };
 #endif
+
 static bool phi_heap_less(const void *lhs, const void *rhs, void *args)
 {
 	return (*(struct pghot_info **)lhs)->frequency >
@@ -94,11 +109,99 @@ static bool phi_heap_insert(struct max_heap *phi_heap, struct pghot_info *phi)
 	return true;
 }
 
+/*
+ * For memory tiering mode, if there are enough free pages (more than
+ * enough watermark defined here) in fast memory node, to take full
+ * advantage of fast memory capacity, all recently accessed slow
+ * memory pages will be migrated to fast memory node without
+ * considering hot threshold.
+ */
+static bool pgdat_free_space_enough(struct pglist_data *pgdat)
+{
+	int z;
+	unsigned long enough_wmark;
+
+	enough_wmark = max(1UL * 1024 * 1024 * 1024 >> PAGE_SHIFT,
+			   pgdat->node_present_pages >> 4);
+	for (z = pgdat->nr_zones - 1; z >= 0; z--) {
+		struct zone *zone = pgdat->node_zones + z;
+
+		if (!populated_zone(zone))
+			continue;
+
+		if (zone_watermark_ok(zone, 0,
+				      promo_wmark_pages(zone) + enough_wmark,
+				      ZONE_MOVABLE, 0))
+			return true;
+	}
+	return false;
+}
+
+/*
+ * For memory tiering mode, too high promotion/demotion throughput may
+ * hurt application latency.  So we provide a mechanism to rate limit
+ * the number of pages that are tried to be promoted.
+ */
+static bool kpromoted_promotion_rate_limit(struct pglist_data *pgdat,
+					   unsigned long rate_limit, int nr,
+					   unsigned long time)
+{
+	unsigned long nr_cand;
+	unsigned int now, start;
+
+	now = jiffies_to_msecs(time);
+	mod_node_page_state(pgdat, PGPROMOTE_CANDIDATE, nr);
+	nr_cand = node_page_state(pgdat, PGPROMOTE_CANDIDATE);
+	start = pgdat->nbp_rl_start;
+	if (now - start > MSEC_PER_SEC &&
+	    cmpxchg(&pgdat->nbp_rl_start, start, now) == start)
+		pgdat->nbp_rl_nr_cand = nr_cand;
+	if (nr_cand - pgdat->nbp_rl_nr_cand >= rate_limit)
+		return true;
+	return false;
+}
+
+static void kpromoted_promotion_adjust_threshold(struct pglist_data *pgdat,
+						 unsigned long rate_limit,
+						 unsigned int ref_th,
+						 unsigned long now)
+{
+	unsigned int start, th_period, unit_th, th;
+	unsigned long nr_cand, ref_cand, diff_cand;
+
+	now = jiffies_to_msecs(now);
+	th_period = KPROMOTED_PROMOTION_THRESHOLD_WINDOW;
+	start = pgdat->nbp_th_start;
+	if (now - start > th_period &&
+	    cmpxchg(&pgdat->nbp_th_start, start, now) == start) {
+		ref_cand = rate_limit *
+			KPROMOTED_PROMOTION_THRESHOLD_WINDOW / MSEC_PER_SEC;
+		nr_cand = node_page_state(pgdat, PGPROMOTE_CANDIDATE);
+		diff_cand = nr_cand - pgdat->nbp_th_nr_cand;
+		unit_th = ref_th * 2 / KPROMOTED_MIGRATION_ADJUST_STEPS;
+		th = pgdat->nbp_threshold ? : ref_th;
+		if (diff_cand > ref_cand * 11 / 10)
+			th = max(th - unit_th, unit_th);
+		else if (diff_cand < ref_cand * 9 / 10)
+			th = min(th + unit_th, ref_th * 2);
+		pgdat->nbp_th_nr_cand = nr_cand;
+		pgdat->nbp_threshold = th;
+	}
+}
+
+static inline unsigned int pghot_access_latency(struct pghot_info *phi, u32  now)
+{
+	return (now - phi->last_update);
+}
+
 static bool phi_is_pfn_hot(struct pghot_info *phi)
 {
 	struct page *page = pfn_to_online_page(phi->pfn);
-	unsigned long now = jiffies;
 	struct folio *folio;
+	struct pglist_data *pgdat;
+	unsigned long rate_limit;
+	unsigned int latency, th, def_th;
+	unsigned long now = jiffies;
 
 	if (!page || is_zone_device_page(page))
 		return false;
@@ -113,7 +216,24 @@ static bool phi_is_pfn_hot(struct pghot_info *phi)
 		return false;
 	}
 
-	return true;
+	pgdat = NODE_DATA(phi->nid);
+	if (pgdat_free_space_enough(pgdat)) {
+		/* workload changed, reset hot threshold */
+		pgdat->nbp_threshold = 0;
+		return true;
+	}
+
+	def_th = sysctl_pghot_freq_window;
+	rate_limit = sysctl_pghot_promote_rate_limit << (20 - PAGE_SHIFT);
+	kpromoted_promotion_adjust_threshold(pgdat, rate_limit, def_th, now);
+
+	th = pgdat->nbp_threshold ? : def_th;
+	latency = pghot_access_latency(phi, now & PGHOT_TIME_MASK);
+	if (latency >= th)
+		return false;
+
+	return !kpromoted_promotion_rate_limit(pgdat, rate_limit,
+					       folio_nr_pages(folio), now);
 }
 
 static struct folio *kpromoted_isolate_folio(struct pghot_info *phi)
@@ -351,9 +471,13 @@ int pghot_record_access(u64 pfn, int nid, int src, unsigned long now)
 	/*
 	 * If the previous access was beyond the threshold window
 	 * start frequency tracking afresh.
+	 *
+	 * Bypass the new window logic for NUMA hint fault source
+	 * as it is too slow in reporting accesses.
+	 * TODO: Fix this.
 	 */
-	if (((cur_time - phi->last_update) > msecs_to_jiffies(sysctl_pghot_freq_window)) ||
-	    (nid != NUMA_NO_NODE && phi->nid != nid))
+	if ((((cur_time - phi->last_update) > msecs_to_jiffies(sysctl_pghot_freq_window))
+	    && (src != PGHOT_HINT_FAULT)) || (nid != NUMA_NO_NODE && phi->nid != nid))
 		new_window = true;
 
 	if (new_entry || new_window) {
