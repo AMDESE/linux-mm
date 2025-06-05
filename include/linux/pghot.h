@@ -71,6 +71,9 @@ enum pghot_src_enabed {
 #define PGHOT_SECTION_HOT_BIT	BIT(0)
 #define PGHOT_SECTION_HOT_MASK	GENMASK(PGHOT_SECTION_HOT_BIT - 1, 0)
 
+#define KMIGRATED_MIGRATION_ADJUST_STEPS	16
+#define KMIGRATED_PROMOTION_THRESHOLD_WINDOW	60000
+
 int pghot_record_access(unsigned long pfn, int nid, int src, unsigned long now);
 #else
 static inline int pghot_record_access(unsigned long pfn, int nid, int src, unsigned long now)
