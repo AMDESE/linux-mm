@@ -42,6 +42,7 @@
 #include <linux/pgalloc_tag.h>
 #include <linux/pagewalk.h>
 #include <linux/cleanup.h>
+#include <linux/pghot.h>
 
 #include <asm/tlb.h>
 #include "internal.h"
@@ -2283,7 +2284,7 @@ vm_fault_t do_huge_pmd_numa_page(struct vm_fault *vmf)
 	int nid = NUMA_NO_NODE;
 	int target_nid, last_cpupid;
 	pmd_t pmd, old_pmd;
-	bool writable = false;
+	bool writable = false, needs_promotion = false;
 	int flags = 0;
 
 	vmf->ptl = pmd_lock(vma->vm_mm, vmf->pmd);
@@ -2310,11 +2311,30 @@ vm_fault_t do_huge_pmd_numa_page(struct vm_fault *vmf)
 		goto out_map;
 
 	nid = folio_nid(folio);
+	needs_promotion = folio_is_promo_candidate(folio);
 
 	target_nid = numa_migrate_check(folio, vmf, haddr, &flags, writable,
 					&last_cpupid);
 	if (target_nid == NUMA_NO_NODE)
 		goto out_map;
+
+	if (needs_promotion) {
+		/*
+		 * Hot page promotion, mode=NUMA_BALANCING_MEMORY_TIERING.
+		 *
+		 * pghot defers migration to the kmigrated kernel thread and does
+		 * it in batches, so the VM_EXEC shared-library filter cannot be
+		 * applied at migration time (no VMA there). Apply it here at
+		 * record time instead: do not record shared executable file
+		 * folios as promotion candidates.
+		 */
+		if (!(folio_is_file_lru(folio) &&
+		      (vma->vm_flags & VM_EXEC) && folio_maybe_mapped_shared(folio)))
+			nid = target_nid;
+		goto out_map;
+	}
+
+	/* Balancing b/n toptier nodes, mode=NUMA_BALANCING_NORMAL */
 	if (migrate_misplaced_folio_prepare(folio, vma, target_nid)) {
 		flags |= TNF_MIGRATE_FAIL;
 		goto out_map;
@@ -2346,6 +2366,18 @@ out_map:
 	update_mmu_cache_pmd(vma, vmf->address, vmf->pmd);
 	spin_unlock(vmf->ptl);
 
+	/*
+	 * Record only a promotable candidate: its nid was advanced to the
+	 * top-tier target_nid above. A shared EXEC page keeps nid = folio_nid
+	 * and must not be promoted, so it is not recorded here.
+	 */
+	if (needs_promotion && nid == target_nid)
+		pghot_record_access(folio_pfn(folio), nid, PGHOT_HINTFAULTS, jiffies);
+	/*
+	 * Even when the hint fault is handed off to pghot for promotion, keep
+	 * feeding NUMA Balancing per-task fault statistics so the scan-period
+	 * controller keeps running.
+	 */
 	if (nid != NUMA_NO_NODE)
 		task_numa_fault(last_cpupid, nid, HPAGE_PMD_NR, flags);
 	return 0;

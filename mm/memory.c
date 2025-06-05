@@ -75,6 +75,7 @@
 #include <linux/perf_event.h>
 #include <linux/ptrace.h>
 #include <linux/vmalloc.h>
+#include <linux/pghot.h>
 #include <linux/sched/sysctl.h>
 #include <linux/pgalloc.h>
 #include <linux/uaccess.h>
@@ -6169,10 +6170,9 @@ int numa_migrate_check(struct folio *folio, struct vm_fault *vmf,
 	if (folio_maybe_mapped_shared(folio) && (vma->vm_flags & VM_SHARED))
 		*flags |= TNF_SHARED;
 	/*
-	 * For memory tiering mode, cpupid of slow memory page is used
-	 * to record page access time.  So use default value.
+	 * For memory tiering mode, last_cpupid is unused. So use default value.
 	 */
-	if (folio_use_access_time(folio))
+	if (folio_is_promo_candidate(folio))
 		*last_cpupid = (-1 & LAST_CPUPID_MASK);
 	else
 		*last_cpupid = folio_last_cpupid(folio);
@@ -6292,6 +6292,7 @@ static vm_fault_t do_numa_page(struct vm_fault *vmf)
 	int nid = NUMA_NO_NODE;
 	bool writable = false, ignore_writable = false;
 	bool pte_write_upgrade = vma_wants_manual_pte_write_upgrade(vma);
+	bool needs_promotion = false;
 	int last_cpupid;
 	int target_nid;
 	pte_t pte, old_pte;
@@ -6326,12 +6327,31 @@ static vm_fault_t do_numa_page(struct vm_fault *vmf)
 		goto out_map;
 
 	nid = folio_nid(folio);
+	needs_promotion = folio_is_promo_candidate(folio);
 	nr_pages = folio_nr_pages(folio);
 
 	target_nid = numa_migrate_check(folio, vmf, vmf->address, &flags,
 					writable, &last_cpupid);
 	if (target_nid == NUMA_NO_NODE)
 		goto out_map;
+
+	if (needs_promotion) {
+		/*
+		 * Hot page promotion, mode=NUMA_BALANCING_MEMORY_TIERING.
+		 *
+		 * pghot defers migration to the kmigrated kernel thread and does
+		 * it in batches, so the VM_EXEC shared-library filter cannot be
+		 * applied at migration time (no VMA there). Apply it here at
+		 * record time instead: do not record shared executable file
+		 * folios as promotion candidates.
+		 */
+		if (!(folio_is_file_lru(folio) &&
+		      (vma->vm_flags & VM_EXEC) && folio_maybe_mapped_shared(folio)))
+			nid = target_nid;
+		goto out_map;
+	}
+
+	/* Balancing b/n toptier nodes, mode=NUMA_BALANCING_NORMAL */
 	if (migrate_misplaced_folio_prepare(folio, vma, target_nid)) {
 		flags |= TNF_MIGRATE_FAIL;
 		goto out_map;
@@ -6371,6 +6391,18 @@ out_map:
 					    writable);
 	pte_unmap_unlock(vmf->pte, vmf->ptl);
 
+	/*
+	 * Record only a promotable candidate: its nid was advanced to the
+	 * top-tier target_nid above. A shared EXEC page keeps nid = folio_nid
+	 * and must not be promoted, so it is not recorded here.
+	 */
+	if (needs_promotion && nid == target_nid)
+		pghot_record_access(folio_pfn(folio), nid, PGHOT_HINTFAULTS, jiffies);
+	/*
+	 * Even when the hint fault is handed off to pghot for promotion, keep
+	 * feeding NUMA Balancing per-task fault statistics so the scan-period
+	 * controller keeps running.
+	 */
 	if (nid != NUMA_NO_NODE)
 		task_numa_fault(last_cpupid, nid, nr_pages, flags);
 	return 0;
