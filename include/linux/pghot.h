@@ -42,6 +42,9 @@ enum pghot_src {
 #define PGHOT_FREQ_MAX		(1 << PGHOT_FREQ_WIDTH)
 #define PGHOT_TIME_MAX		(1 << PGHOT_TIME_WIDTH)
 
+#define KMIGRATED_MIGRATION_ADJUST_STEPS	16
+#define KMIGRATED_PROMOTION_THRESHOLD_WINDOW	60000
+
 int pghot_record_access(unsigned long pfn, int nid, int src, unsigned long now);
 #else
 static inline int pghot_record_access(unsigned long pfn, int nid, int src, unsigned long now)

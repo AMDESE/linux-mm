@@ -39,6 +39,7 @@
 #include <linux/compat.h>
 #include <linux/pgalloc_tag.h>
 #include <linux/pagewalk.h>
+#include <linux/pghot.h>
 
 #include <asm/tlb.h>
 #include <asm/pgalloc.h>
@@ -2050,29 +2051,12 @@ vm_fault_t do_huge_pmd_numa_page(struct vm_fault *vmf)
 
 	target_nid = numa_migrate_check(folio, vmf, haddr, &flags, writable,
 					&last_cpupid);
+	nid = target_nid;
 	if (target_nid == NUMA_NO_NODE)
 		goto out_map;
-	if (migrate_misplaced_folio_prepare(folio, vma, target_nid)) {
-		flags |= TNF_MIGRATE_FAIL;
-		goto out_map;
-	}
-	/* The folio is isolated and isolation code holds a folio reference. */
-	spin_unlock(vmf->ptl);
+
 	writable = false;
 
-	if (!migrate_misplaced_folio(folio, target_nid)) {
-		flags |= TNF_MIGRATED;
-		nid = target_nid;
-		task_numa_fault(last_cpupid, nid, HPAGE_PMD_NR, flags);
-		return 0;
-	}
-
-	flags |= TNF_MIGRATE_FAIL;
-	vmf->ptl = pmd_lock(vma->vm_mm, vmf->pmd);
-	if (unlikely(!pmd_same(pmdp_get(vmf->pmd), vmf->orig_pmd))) {
-		spin_unlock(vmf->ptl);
-		return 0;
-	}
 out_map:
 	/* Restore the PMD */
 	pmd = pmd_modify(pmdp_get(vmf->pmd), vma->vm_page_prot);
@@ -2083,8 +2067,10 @@ out_map:
 	update_mmu_cache_pmd(vma, vmf->address, vmf->pmd);
 	spin_unlock(vmf->ptl);
 
-	if (nid != NUMA_NO_NODE)
+	if (nid != NUMA_NO_NODE) {
+		pghot_record_access(folio_pfn(folio), nid, PGHOT_HINT_FAULT, jiffies);
 		task_numa_fault(last_cpupid, nid, HPAGE_PMD_NR, flags);
+	}
 	return 0;
 }
 
