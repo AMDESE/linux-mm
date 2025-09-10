@@ -1502,6 +1502,14 @@ config HWMEM_PROFILER
 	  rolled up to PGHOT sub-system for further action like hot page
 	  promotion or NUMA Balancing
 
+config KLRUSCAND
+	bool "Kernel lower tier access scan daemon"
+	default n
+	depends on PGHOT && LRU_GEN_WALKS_MMU
+	help
+	  Scan for accesses from lower tiers by invoking MGLRU to perform
+	  page table walks.
+
 source "mm/damon/Kconfig"
 
 endmenu
