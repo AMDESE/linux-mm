@@ -153,3 +153,4 @@ obj-$(CONFIG_PGHOT) += pghot-precise.o
 else
 obj-$(CONFIG_PGHOT) += pghot-default.o
 endif
+obj-$(CONFIG_KLRUSCAND) += klruscand.o
