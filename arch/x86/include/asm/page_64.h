@@ -84,11 +84,23 @@ static inline void clear_pages(void *addr, unsigned int npages)
 	 */
 	kmsan_unpoison_memory(addr, len);
 	asm volatile(ALTERNATIVE_2("call memzero_page_aligned_unrolled",
-				   "shrq $3, %%rcx; rep stosq", X86_FEATURE_REP_GOOD,
-				   "rep stosb", X86_FEATURE_ERMS)
-			: "+c" (len), "+D" (addr), ASM_CALL_CONSTRAINT
-			: "a" (0)
-			: "cc", "memory");
+				"shrq $3, %%rcx; rep stosq", X86_FEATURE_REP_GOOD,
+#if defined(CONFIG_CLEARPAGE_CLZERO)
+		"call clear_pages_clzero", X86_FEATURE_CLZERO)
+		: "+c" (len), "+D" (addr), ASM_CALL_CONSTRAINT
+		: "a" (0)
+		: "cc", "memory");
+#elif defined(CONFIG_CLEARPAGE_MOVNT)
+		"call clear_pages_movnt", X86_FEATURE_XMM2)
+		: "+c" (len), "+D" (addr), ASM_CALL_CONSTRAINT
+		: "a" (0)
+		: "cc", "memory");
+#else
+		"rep stosb", X86_FEATURE_ERMS)
+		: "+c" (len), "+D" (addr), ASM_CALL_CONSTRAINT
+		: "a" (0)
+		: "cc", "memory");
+#endif
 }
 #define clear_pages clear_pages
 

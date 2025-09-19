@@ -4,6 +4,7 @@
 #include <linux/cfi_types.h>
 #include <linux/objtool.h>
 #include <asm/asm.h>
+#include <asm/page_types.h>
 
 /*
  * Zero page aligned region.
@@ -119,3 +120,40 @@ SYM_FUNC_START(rep_stos_alternative)
 	_ASM_EXTABLE_UA(17b, .Lclear_user_tail)
 SYM_FUNC_END(rep_stos_alternative)
 EXPORT_SYMBOL(rep_stos_alternative)
+
+SYM_FUNC_START(clear_pages_movnt)
+	.p2align 4
+.Lstart:
+	movnti  %rax, 0x00(%rdi)
+	movnti  %rax, 0x08(%rdi)
+	movnti  %rax, 0x10(%rdi)
+	movnti  %rax, 0x18(%rdi)
+	movnti  %rax, 0x20(%rdi)
+	movnti  %rax, 0x28(%rdi)
+	movnti  %rax, 0x30(%rdi)
+	movnti  %rax, 0x38(%rdi)
+	addq    $0x40, %rdi
+	subl    $0x40, %ecx
+	ja      .Lstart
+	RET
+SYM_FUNC_END(clear_pages_movnt)
+EXPORT_SYMBOL_GPL(clear_pages_movnt)
+
+/*
+ * Zero a page using clzero (On AMD, with CPU_FEATURE_CLZERO.)
+ *
+ * Caller needs to issue a sfence at the end.
+ */
+
+SYM_FUNC_START(clear_pages_clzero)
+	movq	%rdi,%rax
+	.p2align 4
+.Liter:
+	clzero
+	addq    $0x40, %rax
+	subl    $0x40, %ecx
+	ja      .Liter
+	sfence
+	RET
+SYM_FUNC_END(clear_pages_clzero)
+EXPORT_SYMBOL_GPL(clear_pages_clzero)
