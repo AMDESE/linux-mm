@@ -19,6 +19,7 @@ enum pghot_src {
 	PGHOT_HW_HINTS,
 	PGHOT_PGTABLE_SCAN,
 	PGHOT_HINT_FAULT,
+	PGHOT_FMA,
 };
 
 #ifdef CONFIG_PGHOT
@@ -36,6 +37,7 @@ void pghot_debug_init(void);
 DECLARE_STATIC_KEY_FALSE(pghot_src_hwhints);
 DECLARE_STATIC_KEY_FALSE(pghot_src_pgtscans);
 DECLARE_STATIC_KEY_FALSE(pghot_src_hintfaults);
+DECLARE_STATIC_KEY_FALSE(pghot_src_fma);
 
 /*
  * Bit positions to enable individual sources in pghot/records_enabled
@@ -45,12 +47,15 @@ enum pghot_src_enabled {
 	PGHOT_HWHINTS_BIT = 0,
 	PGHOT_PGTSCAN_BIT,
 	PGHOT_HINTFAULT_BIT,
+	PGHOT_FMA_BIT,
 	PGHOT_MAX_BIT
 };
 
 #define PGHOT_HWHINTS_ENABLED		BIT(PGHOT_HWHINTS_BIT)
 #define PGHOT_PGTSCAN_ENABLED		BIT(PGHOT_PGTSCAN_BIT)
 #define PGHOT_HINTFAULT_ENABLED		BIT(PGHOT_HINTFAULT_BIT)
+#define PGHOT_SRC_ENABLED_MASK		GENMASK(PGHOT_MAX_BIT - 1, 0)
+#define PGHOT_FMA_ENABLED		BIT(PGHOT_FMA_BIT)
 #define PGHOT_SRC_ENABLED_MASK		GENMASK(PGHOT_MAX_BIT - 1, 0)
 
 #define PGHOT_DEFAULT_FREQ_THRESHOLD	2

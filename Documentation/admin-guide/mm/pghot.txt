@@ -23,9 +23,10 @@ Path: /sys/kernel/debug/pghot/
      - 0: Hardware hints (value 0x1)
      - 1: Page table scan (value 0x2)
      - 2: Hint faults (value 0x4)
+     - 3: folio_mark_accessed (value 0x8)
    - Default: 0 (disabled)
    - Example:
-     # echo 0x7 > /sys/kernel/debug/pghot/enabled_sources
+     # echo 0xf > /sys/kernel/debug/pghot/enabled_sources
      Enables all sources.
 
 2. **target_nid**
@@ -81,4 +82,8 @@ Path: /proc/vmstat
 
 4. **pghot_recorded_hintfaults**
    - Number of recorded accesses reported by NUMA Balancing based
+     hotness source.
+
+5. **pghot_recorded_fma**
+   - Number of recorded accesses reported by folio_mark_accessed()
      hotness source.
