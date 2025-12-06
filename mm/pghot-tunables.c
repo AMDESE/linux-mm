@@ -124,6 +124,13 @@ static void pghot_src_enabled_update(unsigned int enabled)
 		else
 			static_branch_disable(&pghot_src_hintfaults);
 	}
+
+	if (changed & PGHOT_FMA_ENABLED) {
+		if (enabled & PGHOT_FMA_ENABLED)
+			static_branch_enable(&pghot_src_fma);
+		else
+			static_branch_disable(&pghot_src_fma);
+	}
 }
 
 static ssize_t pghot_src_enabled_write(struct file *filp, const char __user *ubuf,

@@ -43,6 +43,7 @@ static unsigned int sysctl_pghot_promote_rate_limit = 65536;
 DEFINE_STATIC_KEY_FALSE(pghot_src_hwhints);
 DEFINE_STATIC_KEY_FALSE(pghot_src_pgtscans);
 DEFINE_STATIC_KEY_FALSE(pghot_src_hintfaults);
+DEFINE_STATIC_KEY_FALSE(pghot_src_fma);
 
 #ifdef CONFIG_SYSCTL
 static const struct ctl_table pghot_sysctls[] = {
@@ -112,6 +113,11 @@ int pghot_record_access(unsigned long pfn, int nid, int src, unsigned long now)
 		if (!static_branch_likely(&pghot_src_hintfaults))
 			return -EINVAL;
 		count_vm_event(PGHOT_RECORD_HINTFAULTS);
+		break;
+	case PGHOT_FMA:
+		if (!static_branch_likely(&pghot_src_fma))
+			return -EINVAL;
+		count_vm_event(PGHOT_RECORD_FMA);
 		break;
 	default:
 		return -EINVAL;

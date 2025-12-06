@@ -1506,6 +1506,7 @@ const char * const vmstat_text[] = {
 	[I(PGHOT_RECORD_HWHINTS)]		= "pghot_recorded_hwhints",
 	[I(PGHOT_RECORD_PGTSCANS)]		= "pghot_recorded_pgtscans",
 	[I(PGHOT_RECORD_HINTFAULTS)]		= "pghot_recorded_hintfaults",
+	[I(PGHOT_RECORD_FMA)]			= "pghot_recorded_fma",
 #ifdef CONFIG_HWMEM_PROFILER
 	[I(HWHINT_NR_EVENTS)]			= "hwhint_nr_events",
 	[I(HWHINT_KERNEL)]			= "hwhint_kernel",
