@@ -37,6 +37,8 @@
 #include <linux/page_idle.h>
 #include <linux/local_lock.h>
 #include <linux/buffer_head.h>
+#include <linux/pghot.h>
+#include <linux/memory-tiers.h>
 
 #include "internal.h"
 
@@ -454,8 +456,14 @@ static bool lru_gen_clear_refs(struct folio *folio)
  */
 void folio_mark_accessed(struct folio *folio)
 {
+	unsigned long pfn = folio_pfn(folio);
+
 	if (folio_test_dropbehind(folio))
 		return;
+
+	if (!node_is_toptier(pfn_to_nid(pfn)))
+		pghot_record_access(pfn, NUMA_NO_NODE, PGHOT_FMA, jiffies);
+
 	if (lru_gen_enabled()) {
 		lru_gen_inc_refs(folio);
 		return;

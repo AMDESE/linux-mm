@@ -35,6 +35,7 @@ static unsigned int sysctl_pghot_freq_window = PGHOT_DEFAULT_FREQ_WINDOW;
 static DEFINE_STATIC_KEY_FALSE(pghot_src_hwhints);
 static DEFINE_STATIC_KEY_FALSE(pghot_src_pghtscans);
 static DEFINE_STATIC_KEY_FALSE(pghot_src_hintfaults);
+static DEFINE_STATIC_KEY_FALSE(pghot_src_fma);
 
 #include "pghot-debug.c"
 
@@ -109,6 +110,11 @@ int pghot_record_access(unsigned long pfn, int nid, int src, unsigned long now)
 		if (!static_branch_likely(&pghot_src_hintfaults))
 			return -EINVAL;
 		count_vm_event(PGHOT_RECORD_HINTFAULTS);
+		break;
+	case PGHOT_FMA:
+		if (!static_branch_likely(&pghot_src_fma))
+			return -EINVAL;
+		count_vm_event(PGHOT_RECORD_FMA);
 		break;
 	default:
 		return -EINVAL;
