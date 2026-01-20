@@ -10,6 +10,9 @@
  * the frequency of access and last access time. Promotions are done
  * to a default toptier NID.
  *
+ * In the precision mode, 4 bytes are used to store the frequency
+ * of access, last access time and the accessing NID.
+ *
  * A kernel thread named kmigrated is provided to migrate or promote
  * the hot pages. kmigrated runs for each lower tier node. It iterates
  * over the node's PFNs and  migrates pages marked for migration into
@@ -17,11 +20,11 @@
  *
  * Note on time tracking and its inherent limitation:
  *
- * pghot tracks the last access time in a fixed-width field of the per-PFN
- * record (5 bucketed bits in default mode), and the
+ * Both modes track the last access time in a fixed-width field of the per-PFN
+ * record (14 bits in precision mode, 5 bucketed bits in default mode), and the
  * access latency is computed as a masked subtraction over that field. As with
  * any limited-width timestamp, the latency wraps once two accesses are farther
- * apart than the field can represent (~4 s in default
+ * apart than the field can represent (~16 s in precision mode, ~4 s in default
  * mode, at HZ=1000); beyond that a long-idle page can alias to a small latency
  * and appear recently hot. This is not specific to pghot: the existing NUMA
  * Balancing tiering mode (numa_balancing=2) has the same property in
@@ -174,13 +177,15 @@ static bool kmigrated_started __ro_after_init;
  * for the purpose of tracking page hotness and subsequent promotion.
  *
  * @pfn: PFN of the page
- * @nid: Unused
+ * @nid: Target NID to where the page needs to be migrated in precision
+ *       mode but unused in default mode
  * @src: The identifier of the sub-system that reports the access
  * @now: Access time in jiffies
  *
- * Updates the frequency and time of access and marks the page as
- * ready for migration if the frequency crosses a threshold. The pages
- * marked for migration are migrated by kmigrated kernel thread.
+ * Updates the NID (in precision mode only), frequency and time of access
+ * and marks the page as ready for migration if the frequency crosses a
+ * threshold. The pages marked for migration are migrated by kmigrated
+ * kernel thread.
  *
  * Return: 0 on success and -EINVAL on failure to record the access.
  */

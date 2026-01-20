@@ -38,21 +38,23 @@ DECLARE_STATIC_KEY_FALSE(pghot_src_hwhints);
 /*
  * Per-PFN hotness record (phi_t) layout and unit conventions
  * ----------------------------------------------------------
- * The per-PFN record is a single byte (u8) in default mode:
+ * The record is one word whose width depends on the mode:
  *
- *   [ ready:1 | time:5 (bucketed) | freq:2 ]   bits 7..0
+ *   default (u8):  [ ready:1 | time:5 (bucketed) | freq:2 ]          bits 7..0
+ *   precise (u32): [ ready:1 | resv:4 | time:14 | freq:3 | nid:10 ]  bits 31..0
  *
  * Fields:
+ *   nid   - promotion target node. Precise mode stores it per-PFN; default
+ *           mode has no room for it and promotes to the global
+ *           sysctl_pghot_target_nid instead.
  *   freq  - per-window access counter, saturating at PGHOT_FREQ_MAX; when it
  *           reaches sysctl_pghot_freq_threshold the ready bit is set.
- *   time  - last access time in the JIFFIES domain, stored as jiffies bucketed
- *           by PGHOT_TIME_BUCKETS_SHIFT (PGHOT_TIME_WIDTH bits, ~4 s span at
- *           HZ=1000). Being a fixed-width field it wraps -- see the
- *           time-tracking note atop mm/pghot.c.
+ *   time  - last access time in the JIFFIES domain: precise stores the raw
+ *           low jiffies (PGHOT_TIME_WIDTH bits, ~16 s span at HZ=1000);
+ *           default stores jiffies bucketed by PGHOT_TIME_BUCKETS_SHIFT
+ *           (PGHOT_TIME_WIDTH bits, ~4 s span). Being a fixed-width field it
+ *           wraps -- see the time-tracking note atop mm/pghot.c.
  *   ready - MSB (PGHOT_MIGRATE_READY); marks the page ready for promotion.
- *
- * The promotion target node is not stored in the record; hot pages are
- * promoted to the global sysctl_pghot_target_nid.
  *
  * Units boundary (jiffies vs. milliseconds):
  *   The stored time is jiffies. pghot_access_latency() takes the masked jiffies
@@ -67,8 +69,42 @@ DECLARE_STATIC_KEY_FALSE(pghot_src_hwhints);
 
 #define PGHOT_DEFAULT_NODE		0
 
+#if defined(CONFIG_PGHOT_PRECISE)
 #define PGHOT_PROMOTE_WINDOW_MIN		(1 * MSEC_PER_SEC)
-#define PGHOT_PROMOTE_WINDOW_DEFAULT	(3 * MSEC_PER_SEC)
+#define PGHOT_PROMOTE_WINDOW_DEFAULT	(5 * MSEC_PER_SEC)
+
+#define PGHOT_MIGRATE_READY		31
+
+#define PGHOT_NID_WIDTH			10
+#define PGHOT_FREQ_WIDTH		3
+/* time is stored in 14 bits which can represent up to 16s with HZ=1000 */
+#define PGHOT_TIME_WIDTH		14
+
+#define PGHOT_NID_SHIFT			0
+#define PGHOT_FREQ_SHIFT		(PGHOT_NID_SHIFT + PGHOT_NID_WIDTH)
+#define PGHOT_TIME_SHIFT		(PGHOT_FREQ_SHIFT + PGHOT_FREQ_WIDTH)
+
+#define PGHOT_NID_MASK			GENMASK(PGHOT_NID_WIDTH - 1, 0)
+#define PGHOT_FREQ_MASK			GENMASK(PGHOT_FREQ_WIDTH - 1, 0)
+#define PGHOT_TIME_MASK			GENMASK(PGHOT_TIME_WIDTH - 1, 0)
+
+#define PGHOT_NID_MAX			((1 << PGHOT_NID_WIDTH) - 1)
+#define PGHOT_FREQ_MAX			((1 << PGHOT_FREQ_WIDTH) - 1)
+#define PGHOT_TIME_MAX			((1 << PGHOT_TIME_WIDTH) - 1)
+#define PGHOT_PROMOTE_WINDOW_MAX_JIFFIES	PGHOT_TIME_MAX
+
+typedef u32 phi_t;
+
+/*
+ * The target nid is packed into PGHOT_NID_WIDTH bits of the u32 record, so
+ * MAX_NUMNODES must fit or nids would be silently truncated at runtime.
+ */
+static_assert(MAX_NUMNODES <= (1 << PGHOT_NID_WIDTH),
+	      "pghot precise nid field too narrow for MAX_NUMNODES");
+
+#else	/* !CONFIG_PGHOT_PRECISE */
+#define PGHOT_PROMOTE_WINDOW_MIN		(1 * MSEC_PER_SEC)
+#define PGHOT_PROMOTE_WINDOW_DEFAULT       (3 * MSEC_PER_SEC)
 
 /*
  * Bits 0-6 are used to store frequency and time.
@@ -95,6 +131,8 @@ DECLARE_STATIC_KEY_FALSE(pghot_src_hwhints);
 #define PGHOT_PROMOTE_WINDOW_MAX_JIFFIES	PGHOT_TIME_BUCKETS_MASK
 
 typedef u8 phi_t;
+
+#endif /* CONFIG_PGHOT_PRECISE */
 
 #define PGHOT_RECORD_SIZE		sizeof(phi_t)
 
