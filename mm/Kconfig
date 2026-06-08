@@ -651,7 +651,7 @@ config DEVICE_MIGRATION
 # Selected by migrator drivers (e.g. CONFIG_DCBM_DMA).
 config MIGRATION_COPY_OFFLOAD
 	bool
-	depends on MIGRATION
+	depends on MIGRATION && 64BIT
 
 config ARCH_ENABLE_HUGEPAGE_MIGRATION
 	bool
