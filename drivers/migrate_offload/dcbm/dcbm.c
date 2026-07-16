@@ -15,7 +15,13 @@
 #include <linux/migrate.h>
 #include <linux/migrate_copy_offload.h>
 
-#define MAX_DMA_CHANNELS	16
+#define MAX_DMA_CHANNELS	1
+
+/*
+ * Submit at most this many folios per chunk, so that one chunk always fits
+ * in the provider's descriptor ring (SDXI: at least 1K entries).
+ */
+#define DCBM_RING_LIMIT	512
 
 static atomic_long_t folios_migrated;
 static atomic_long_t folios_failures;
@@ -142,40 +148,30 @@ err_free_src:
 	return ret;
 }
 
-static void cleanup_dma_work(struct dma_work *works, int actual_channels)
+static void cleanup_dma_work(struct dma_work *work, bool aborted)
 {
 	struct device *dev;
-	int i;
 
-	if (!works)
+	if (!work->chan)
 		return;
 
-	for (i = 0; i < actual_channels; i++) {
-		if (!works[i].chan)
-			continue;
+	dev = dmaengine_get_dma_device(work->chan);
 
-		dev = dmaengine_get_dma_device(works[i].chan);
+	if (aborted && work->mapped)
+		dmaengine_terminate_sync(work->chan);
 
-		if (works[i].mapped)
-			dmaengine_terminate_sync(works[i].chan);
-
-		if (dev && works[i].mapped) {
-			if (works[i].src_sgt) {
-				dma_unmap_sgtable(dev, works[i].src_sgt,
-						  DMA_TO_DEVICE, 0);
-				sg_free_table(works[i].src_sgt);
-				kfree(works[i].src_sgt);
-			}
-			if (works[i].dst_sgt) {
-				dma_unmap_sgtable(dev, works[i].dst_sgt,
-						  DMA_FROM_DEVICE, 0);
-				sg_free_table(works[i].dst_sgt);
-				kfree(works[i].dst_sgt);
-			}
+	if (dev && work->mapped) {
+		if (work->src_sgt) {
+			dma_unmap_sgtable(dev, work->src_sgt, DMA_TO_DEVICE, 0);
+			sg_free_table(work->src_sgt);
+			kfree(work->src_sgt);
 		}
-		dma_release_channel(works[i].chan);
+		if (work->dst_sgt) {
+			dma_unmap_sgtable(dev, work->dst_sgt, DMA_FROM_DEVICE, 0);
+			sg_free_table(work->dst_sgt);
+			kfree(work->dst_sgt);
+		}
 	}
-	kfree(works);
 }
 
 static int submit_dma_transfers(struct dma_work *work)
@@ -189,9 +185,8 @@ static int submit_dma_transfers(struct dma_work *work)
 	/*
 	 * Every txd carries the callback, so an error on any of them is seen.
 	 * Only the last one interrupts; virt-dma runs all callbacks on reap.
+	 * The caller holds a bias on @pending until submission is finished.
 	 */
-	atomic_set(&work->pending, work->src_sgt->nents);
-
 	sg_src = work->src_sgt->sgl;
 	sg_dst = work->dst_sgt->sgl;
 	for_each_sgtable_dma_sg(work->src_sgt, sg_src, i) {
@@ -202,17 +197,16 @@ static int submit_dma_transfers(struct dma_work *work)
 					       sg_dma_address(sg_dst),
 					       sg_dma_address(sg_src),
 					       sg_dma_len(sg_src), flags);
-		if (!tx) {
-			atomic_set(&work->pending, 0);
+		if (!tx)
 			return -EIO;
-		}
 
 		tx->callback_result = dma_completion_callback;
 		tx->callback_param = work;
 
+		atomic_inc(&work->pending);
 		cookie = dmaengine_submit(tx);
 		if (dma_submit_error(cookie)) {
-			atomic_set(&work->pending, 0);
+			atomic_dec(&work->pending);
 			return -EIO;
 		}
 		sg_dst = sg_next(sg_dst);
@@ -231,98 +225,88 @@ static int submit_dma_transfers(struct dma_work *work)
 static int folios_copy_dma(struct list_head *dst_list,
 			   struct list_head *src_list, unsigned int nr_folios)
 {
-	struct folio *dst;
-	struct dma_work *works;
 	struct list_head *src_pos = src_list->next;
 	struct list_head *dst_pos = dst_list->next;
-	int i, folios_per_chan, ret;
-	dma_cap_mask_t mask;
-	int actual_channels = 0;
-	unsigned int max_channels;
+	unsigned int remaining = nr_folios;
+	unsigned int done = 0;
+	struct dma_chan *chan;
+	int ret = 0;
 
-	max_channels = min3(READ_ONCE(nr_dma_channels), nr_folios,
-			    (unsigned int)MAX_DMA_CHANNELS);
-
-	works = kcalloc(max_channels, sizeof(*works), GFP_KERNEL);
-	if (!works)
-		return -ENOMEM;
-
-	dma_cap_zero(mask);
-	dma_cap_set(DMA_MEMCPY, mask);
-
-	for (i = 0; i < max_channels; i++) {
-		works[actual_channels].chan = dma_request_chan_by_mask(&mask);
-		if (IS_ERR(works[actual_channels].chan))
-			break;
-		init_completion(&works[actual_channels].done);
-		actual_channels++;
-	}
-
-	if (actual_channels == 0) {
-		kfree(works);
-		return -ENODEV;
-	}
-
-	for (i = 0; i < actual_channels; i++) {
-		folios_per_chan = nr_folios * (i + 1) / actual_channels -
-				(nr_folios * i) / actual_channels;
-		if (folios_per_chan == 0)
-			continue;
-
-		ret = setup_sg_tables(&works[i], &src_pos, &dst_pos,
-				      folios_per_chan);
-		if (ret)
-			goto err_cleanup;
-	}
-
-	for (i = 0; i < actual_channels; i++) {
-		if (!works[i].mapped)
-			continue;
-		ret = submit_dma_transfers(&works[i]);
-		if (ret)
-			goto err_cleanup;
-	}
-
-	for (i = 0; i < actual_channels; i++) {
-		if (atomic_read(&works[i].pending) > 0)
-			dma_async_issue_pending(works[i].chan);
-	}
-
-	for (i = 0; i < actual_channels; i++) {
-		if (atomic_read(&works[i].pending) == 0)
-			continue;
-		if (!wait_for_completion_timeout(&works[i].done,
-						 msecs_to_jiffies(10000))) {
-			ret = -ETIMEDOUT;
-			goto err_cleanup;
-		}
-	}
-
-	for (i = 0; i < actual_channels; i++) {
-		if (READ_ONCE(works[i].error)) {
-			ret = -EIO;
-			goto err_cleanup;
-		}
-	}
+	if (!nr_folios)
+		return 0;
 
 	/*
-	 * All folios copied; mark each dst with FOLIO_CONTENT_COPIED so
-	 * __migrate_folio() skips the per-folio copy in the move phase.
+	 * use dma_find_channel() for SDXI DMA_MEMCPY channels.
+	 * TODO: Handle both private (PTDMA) and shared channels.
 	 */
-	list_for_each_entry(dst, dst_list, lru)
-		dst->migrate_info |= FOLIO_CONTENT_COPIED;
+	chan = dma_find_channel(DMA_MEMCPY);
+	if (!chan)
+		return -ENODEV;
 
-	cleanup_dma_work(works, actual_channels);
+	while (remaining) {
+		unsigned int chunk = min(remaining, DCBM_RING_LIMIT);
+		struct dma_work work = { .chan = chan };
+		struct list_head *dst_chunk = dst_pos;
+		unsigned int i;
 
-	atomic_long_add(nr_folios, &folios_migrated);
-	return 0;
+		init_completion(&work.done);
 
-err_cleanup:
-	pr_warn_ratelimited("dcbm: DMA copy failed (%d), falling back to CPU\n",
-			    ret);
-	cleanup_dma_work(works, actual_channels);
+		ret = setup_sg_tables(&work, &src_pos, &dst_pos, chunk);
+		if (ret)
+			goto out;
 
-	atomic_long_add(nr_folios, &folios_failures);
+		/* Bias: @done cannot fire while txds are still being submitted. */
+		atomic_set(&work.pending, 1);
+		ret = submit_dma_transfers(&work);
+
+		/*
+		 * Issue and wait for whatever was submitted, even on error. The
+		 * channel is shared, so terminating it would abort other users'
+		 * transactions, and a submitted txd left behind would later run
+		 * its callback against this stack frame.
+		 */
+		dma_async_issue_pending(work.chan);
+		if (atomic_dec_and_test(&work.pending))
+			complete(&work.done);
+
+		if (!wait_for_completion_timeout(&work.done,
+						 msecs_to_jiffies(10000))) {
+			/* The device is stuck; nothing else can be done. */
+			ret = -ETIMEDOUT;
+			cleanup_dma_work(&work, true);
+			goto out;
+		}
+		if (!ret && READ_ONCE(work.error))
+			ret = -EIO;
+		if (ret) {
+			cleanup_dma_work(&work, false);
+			goto out;
+		}
+		/*
+		 * All folios copied; mark each dst with FOLIO_CONTENT_COPIED so
+		 * __migrate_folio() skips the per-folio copy in the move phase.
+		 */
+
+		for (i = 0; i < chunk; i++) {
+			struct folio *dst = list_entry(dst_chunk, struct folio, lru);
+
+			dst->migrate_info |= FOLIO_CONTENT_COPIED;
+			dst_chunk = dst_chunk->next;
+		}
+
+		cleanup_dma_work(&work, false);
+		done += chunk;
+		remaining -= chunk;
+	}
+
+out:
+	if (done)
+		atomic_long_add(done, &folios_migrated);
+	if (ret) {
+		pr_warn_ratelimited("dcbm: DMA copy failed (%d) after %u/%u folios; CPU fallback for the rest\n",
+				    ret, done, nr_folios);
+		atomic_long_add(nr_folios - done, &folios_failures);
+	}
 	return ret;
 }
 
@@ -405,7 +389,7 @@ static const struct kernel_param_ops nr_dma_chan_param_ops = {
 	.get = nr_dma_chan_param_get,
 };
 module_param_cb(nr_dma_chan, &nr_dma_chan_param_ops, NULL, 0644);
-MODULE_PARM_DESC(nr_dma_chan, "Max DMA channels to use (1..16)");
+MODULE_PARM_DESC(nr_dma_chan, "Max DMA channels to use (only 1 is supported for now)");
 
 /* reason_mask: set of MR_* reasons this migrator handles */
 static int reason_mask_param_set(const char *val, const struct kernel_param *kp)
@@ -477,6 +461,7 @@ MODULE_PARM_DESC(folios_failures, "DMA-copy failure count (write to reset)");
 
 static int __init dcbm_init(void)
 {
+	dmaengine_get();
 	pr_info("dcbm: DMA Core Batch Migrator initialized\n");
 	return 0;
 }
@@ -489,6 +474,8 @@ static void __exit dcbm_exit(void)
 		offloading_enabled = false;
 	}
 	mutex_unlock(&dcbm_mutex);
+
+	dmaengine_put();
 
 	pr_info("dcbm: DMA Core Batch Migrator unloaded\n");
 }
