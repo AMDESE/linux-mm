@@ -376,6 +376,57 @@ static pte_t migration_entry_to_pte(struct folio *folio, struct page *new,
 }
 
 /*
+ * Restore a potential migration pte to a working pte entry for hugetlb folios.
+ */
+#ifdef CONFIG_HUGETLB_PAGE
+static bool remove_migration_pte_hugetlb(struct folio *folio,
+		struct vm_area_struct *vma, unsigned long addr, void *arg)
+{
+	struct rmap_walk_arg *rmap_walk_arg = arg;
+	DEFINE_FOLIO_VMA_WALK(pvmw, rmap_walk_arg->folio, vma, addr, PVMW_SYNC | PVMW_MIGRATION);
+	struct hstate *h = hstate_vma(vma);
+	unsigned int shift = huge_page_shift(h);
+	unsigned long psize = huge_page_size(h);
+	struct page *new = folio_page(folio, 0);
+	rmap_t rmap_flags = RMAP_NONE;
+	pte_t old_pte, pte;
+	softleaf_t entry;
+
+	/* There is only a single mapping in a VMA. */
+	if (!page_vma_mapped_walk(&pvmw))
+		return true;
+
+	old_pte = huge_ptep_get(vma->vm_mm, pvmw.address, pvmw.pte);
+	entry = softleaf_from_pte(old_pte);
+	folio_get(folio);
+	pte = migration_entry_to_pte(folio, new, entry, old_pte, vma, &rmap_flags);
+	pte = arch_make_huge_pte(pte, shift, vma->vm_flags);
+	if (folio_test_anon(folio))
+		hugetlb_add_anon_rmap(folio, vma, pvmw.address, rmap_flags);
+	else
+		hugetlb_add_file_rmap(folio);
+	set_huge_pte_at(vma->vm_mm, pvmw.address, pvmw.pte, pte, psize);
+
+	if (READ_ONCE(vma->vm_flags) & VM_LOCKED)
+		mlock_drain_local();
+
+	trace_remove_migration_pte(pvmw.address, pte_val(pte), compound_order(new));
+
+	/* No need to invalidate - it was non-present before */
+	update_mmu_cache(vma, pvmw.address, pvmw.pte);
+	page_vma_mapped_walk_done(&pvmw);
+
+	return true;
+}
+#else
+static bool remove_migration_pte_hugetlb(struct folio *folio,
+		struct vm_area_struct *vma, unsigned long addr, void *arg)
+{
+	return false;
+}
+#endif /* CONFIG_HUGETLB_PAGE */
+
+/*
  * Restore a potential migration pte to a working pte entry
  */
 static bool remove_migration_pte(struct folio *folio,
@@ -395,20 +446,14 @@ static bool remove_migration_pte(struct folio *folio,
 #ifdef CONFIG_ARCH_HAS_PMD_SOFTLEAVES
 		/* PMD-mapped THP migration entry */
 		if (!pvmw.pte) {
-			VM_BUG_ON_FOLIO(folio_test_hugetlb(folio) ||
-					!folio_test_pmd_mappable(folio), folio);
+			VM_WARN_ON_ONCE_FOLIO(!folio_test_pmd_mappable(folio), folio);
 			remove_migration_pmd(&pvmw, folio);
 			continue;
 		}
 #endif
-		if (folio_test_hugetlb(folio))
-			old_pte = huge_ptep_get(vma->vm_mm, pvmw.address,
-						pvmw.pte);
-		else
-			old_pte = ptep_get(pvmw.pte);
-
+		old_pte = ptep_get(pvmw.pte);
 		entry = softleaf_from_pte(old_pte);
-		if (folio_test_large(folio) && !folio_test_hugetlb(folio))
+		if (folio_test_large(folio))
 			idx = softleaf_to_pfn(entry) - pvmw.pfn;
 
 		if (rmap_walk_arg->map_unused_to_zeropage &&
@@ -434,30 +479,12 @@ static bool remove_migration_pte(struct folio *folio,
 				pte = pte_swp_mkuffd(pte);
 		}
 
-#ifdef CONFIG_HUGETLB_PAGE
-		if (folio_test_hugetlb(folio)) {
-			struct hstate *h = hstate_vma(vma);
-			unsigned int shift = huge_page_shift(h);
-			unsigned long psize = huge_page_size(h);
-
-			pte = arch_make_huge_pte(pte, shift, vma->vm_flags);
-			if (folio_test_anon(folio))
-				hugetlb_add_anon_rmap(folio, vma, pvmw.address,
-						      rmap_flags);
-			else
-				hugetlb_add_file_rmap(folio);
-			set_huge_pte_at(vma->vm_mm, pvmw.address, pvmw.pte, pte,
-					psize);
-		} else
-#endif
-		{
-			if (folio_test_anon(folio))
-				folio_add_anon_rmap_pte(folio, new, vma,
-							pvmw.address, rmap_flags);
-			else
-				folio_add_file_rmap_pte(folio, new, vma);
-			set_pte_at(vma->vm_mm, pvmw.address, pvmw.pte, pte);
-		}
+		if (folio_test_anon(folio))
+			folio_add_anon_rmap_pte(folio, new, vma,
+						pvmw.address, rmap_flags);
+		else
+			folio_add_file_rmap_pte(folio, new, vma);
+		set_pte_at(vma->vm_mm, pvmw.address, pvmw.pte, pte);
 		if (READ_ONCE(vma->vm_flags) & VM_LOCKED)
 			mlock_drain_local();
 
@@ -484,7 +511,9 @@ void remove_migration_ptes(struct folio *src, struct folio *dst,
 	};
 
 	struct rmap_walk_control rwc = {
-		.rmap_one = remove_migration_pte,
+		.rmap_one = folio_test_hugetlb(src) ?
+				remove_migration_pte_hugetlb :
+				remove_migration_pte,
 		.arg = &rmap_walk_arg,
 	};
 
