@@ -345,6 +345,36 @@ struct rmap_walk_arg {
 	bool map_unused_to_zeropage;
 };
 
+static pte_t migration_entry_to_pte(struct folio *folio, struct page *new,
+		softleaf_t entry, pte_t old_pte, struct vm_area_struct *vma,
+		rmap_t *rmap_flags)
+{
+	pte_t pte = mk_pte(new, READ_ONCE(vma->vm_page_prot));
+
+	if (!softleaf_is_migration_young(entry))
+		pte = pte_mkold(pte);
+	if (folio_test_dirty(folio) && softleaf_is_migration_dirty(entry))
+		pte = pte_mkdirty(pte);
+	if (pte_swp_soft_dirty(old_pte))
+		pte = pte_mksoft_dirty(pte);
+	else
+		pte = pte_clear_soft_dirty(pte);
+
+	if (softleaf_is_migration_write(entry))
+		pte = pte_mkwrite(pte, vma);
+	else if (pte_swp_uffd(old_pte))
+		pte = pte_mkuffd(pte);
+
+	/* See do_swap_page(): restore PAGE_NONE for RWP */
+	if (pte_swp_uffd(old_pte) && userfaultfd_rwp(vma))
+		pte = pte_modify(pte, PAGE_NONE);
+
+	if (folio_test_anon(folio) && !softleaf_is_migration_read(entry))
+		*rmap_flags |= RMAP_EXCLUSIVE;
+
+	return pte;
+}
+
 /*
  * Restore a potential migration pte to a working pte entry
  */
@@ -387,27 +417,8 @@ static bool remove_migration_pte(struct folio *folio,
 
 		folio_get(folio);
 		new = folio_page(folio, idx);
-		pte = mk_pte(new, READ_ONCE(vma->vm_page_prot));
-		if (!softleaf_is_migration_young(entry))
-			pte = pte_mkold(pte);
-		if (folio_test_dirty(folio) && softleaf_is_migration_dirty(entry))
-			pte = pte_mkdirty(pte);
-		if (pte_swp_soft_dirty(old_pte))
-			pte = pte_mksoft_dirty(pte);
-		else
-			pte = pte_clear_soft_dirty(pte);
-
-		if (softleaf_is_migration_write(entry))
-			pte = pte_mkwrite(pte, vma);
-		else if (pte_swp_uffd(old_pte))
-			pte = pte_mkuffd(pte);
-
-		/* See do_swap_page(): restore PAGE_NONE for RWP */
-		if (pte_swp_uffd(old_pte) && userfaultfd_rwp(vma))
-			pte = pte_modify(pte, PAGE_NONE);
-
-		if (folio_test_anon(folio) && !softleaf_is_migration_read(entry))
-			rmap_flags |= RMAP_EXCLUSIVE;
+		pte = migration_entry_to_pte(folio, new, entry, old_pte, vma,
+					     &rmap_flags);
 
 		if (unlikely(is_device_private_page(new))) {
 			if (pte_write(pte))
