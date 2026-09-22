@@ -10,6 +10,9 @@ enum pghot_src {
 };
 
 #ifdef CONFIG_PGHOT
+#include <linux/bitmap.h>
+#include <linux/math.h>
+#include <linux/mmzone.h>
 #include <linux/static_key.h>
 #include <linux/mutex.h>
 
@@ -138,12 +141,45 @@ typedef u8 phi_t;
 
 #define PGHOT_SECTION_HOT_BIT		0
 
+/*
+ * Sub-section hotness granularity.
+ *
+ * The section hot bit only says "at least one of this section's PFNs is hot",
+ * so kmigrated has to rescan all PAGES_PER_SECTION PFNs to find them. Sources
+ * that report accesses sparsely (hardware sampling reports roughly one access
+ * per sample period) leave only a handful of ready records behind per pass, so
+ * almost all of that scan finds nothing and the section is rescanned again as
+ * the next few samples land on other PFNs.
+ *
+ * Split the section into PGHOT_SUBSECTION_PAGES-sized chunks and keep one bit
+ * per chunk, so a pass walks only the chunks that hold a hot PFN. 512 pages is
+ * 2MB with 4K pages, which needs exactly 64 bits - a single unsigned long -
+ * for the 128MB sections used by x86_64, arm64/4K, s390 and others.
+ * Architectures with larger sections (loongarch, sparc: 512MB/1GB) use
+ * proportionally more, and a section smaller than the chunk (powerpc with 64K
+ * pages: 16MB sections, 256 pages) clamps to one bit covering the section,
+ * which walks exactly as it does today.
+ */
+#define PGHOT_SUBSECTION_PAGES_SHIFT	9
+#define PGHOT_SUBSECTION_SHIFT		MIN(PGHOT_SUBSECTION_PAGES_SHIFT, \
+					    PFN_SECTION_SHIFT)
+#define PGHOT_SUBSECTION_PAGES		(1UL << PGHOT_SUBSECTION_SHIFT)
+#define PGHOT_SUBSECTIONS		(PAGES_PER_SECTION >> PGHOT_SUBSECTION_SHIFT)
+
+static inline unsigned long pghot_subsection_idx(unsigned long pfn)
+{
+	return (pfn % PAGES_PER_SECTION) >> PGHOT_SUBSECTION_SHIFT;
+}
+
 /**
  * struct pghot_hot_map - per-section hotness map
  * @rcu:   used to free the map after an RCU grace period via kfree_rcu().
  * @flags: section-level flags; currently only PGHOT_SECTION_HOT_BIT, set
  *         when the section contains at least one page classified as hot
  *         and consumed by the kmigrated thread.
+ * @hot_subsections: one bit per PGHOT_SUBSECTION_PAGES-sized chunk of the
+ *         section, set when that chunk contains at least one page classified
+ *         as hot. kmigrated walks only the chunks whose bit is set.
  * @phi:   per-PFN hotness records, PAGES_PER_SECTION entries.
  *
  * Referenced from struct mem_section through an RCU-protected pointer
@@ -153,6 +189,7 @@ typedef u8 phi_t;
 struct pghot_hot_map {
 	struct rcu_head rcu;
 	unsigned long flags;
+	unsigned long hot_subsections[BITS_TO_LONGS(PGHOT_SUBSECTIONS)];
 	phi_t phi[];
 };
 

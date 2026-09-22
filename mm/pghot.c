@@ -262,6 +262,16 @@ int pghot_record_access(unsigned long pfn, int nid, int src, unsigned long now)
 	 * Update the hotness parameters.
 	 */
 	if (pghot_update_record(phi, nid, now)) {
+		set_bit(pghot_subsection_idx(pfn), hot_map->hot_subsections);
+		/*
+		 * The sub-section bit has to be visible before the section bit
+		 * that sends kmigrated to the bitmap. In the other order a pass
+		 * could see the section bit, find no sub-section bit set, clear
+		 * the section bit and leave this record waiting for a further
+		 * access to re-arm the section. Pairs with the ordering the
+		 * consumer's test_and_clear_bit() already provides.
+		 */
+		smp_mb__before_atomic();
 		set_bit(PGHOT_SECTION_HOT_BIT, &hot_map->flags);
 		set_bit(PGDAT_KMIGRATED_ACTIVATE, &page_pgdat(page)->flags);
 	}
@@ -315,16 +325,52 @@ static void pghot_clear_hotness(unsigned long pfn)
 	rcu_read_unlock();
 }
 
+/**
+ * struct kmigrated_batch - folios accumulated for one promotion batch
+ * @folios: isolated folios awaiting promote_misplaced_memcg_folios().
+ * @memcg:  batching key only, never dereferenced (see the folio_memcg() note
+ *          in kmigrated_walk_zone()).
+ * @nid:    promotion target shared by every folio in @folios.
+ * @nr:     number of folios in @folios.
+ *
+ * The batch is carried across every chunk of every section in one kmigrated
+ * pass, so that it still fills up when each chunk holds only a handful of
+ * ready folios. At a fine granularity a whole section can yield a single ready
+ * folio, so flushing per chunk (or even per section) would spend a
+ * migrate_pages() and its TLB shootdown on one folio at a time. The folios
+ * sit isolated until the batch is flushed, which is bounded by
+ * kmigrated_batch_nr or the end of the pass, whichever comes first.
+ */
+struct kmigrated_batch {
+	struct list_head folios;
+	struct mem_cgroup *memcg;
+	int nid;
+	int nr;
+};
+
+static void kmigrated_batch_init(struct kmigrated_batch *batch)
+{
+	INIT_LIST_HEAD(&batch->folios);
+	batch->memcg = NULL;
+	batch->nid = NUMA_NO_NODE;
+	batch->nr = 0;
+}
+
+static void kmigrated_batch_flush(struct kmigrated_batch *batch)
+{
+	if (list_empty(&batch->folios))
+		return;
+
+	promote_misplaced_memcg_folios(&batch->folios, batch->nid);
+	batch->nr = 0;
+}
+
 /*
  * Walks the PFNs of the zone, isolates and migrates them in batches.
  */
 static void kmigrated_walk_zone(unsigned long start_pfn, unsigned long end_pfn,
-				int src_nid)
+				int src_nid, struct kmigrated_batch *batch)
 {
-	struct mem_cgroup *cur_memcg = NULL;
-	int cur_nid = NUMA_NO_NODE;
-	LIST_HEAD(migrate_list);
-	int batch_count = 0;
 	struct folio *folio;
 	struct page *page;
 	unsigned long pfn;
@@ -403,53 +449,78 @@ static void kmigrated_walk_zone(unsigned long start_pfn, unsigned long end_pfn,
 		rcu_read_lock();
 		memcg = folio_memcg(folio);
 		rcu_read_unlock();
-		if (cur_nid == NUMA_NO_NODE) {
-			cur_nid = nid;
-			cur_memcg = memcg;
+		if (batch->nid == NUMA_NO_NODE) {
+			batch->nid = nid;
+			batch->memcg = memcg;
 		}
 
 		/* If NID or memcg changed, flush the previous batch first */
-		if (cur_nid != nid || cur_memcg != memcg) {
-			if (!list_empty(&migrate_list))
-				promote_misplaced_memcg_folios(&migrate_list, cur_nid);
-			cur_nid = nid;
-			cur_memcg = memcg;
-			batch_count = 0;
+		if (batch->nid != nid || batch->memcg != memcg) {
+			kmigrated_batch_flush(batch);
+			batch->nid = nid;
+			batch->memcg = memcg;
 			cond_resched();
 		}
 
-		list_add(&folio->lru, &migrate_list);
+		list_add(&folio->lru, &batch->folios);
 		folio_put(folio);
 
-		if (++batch_count > READ_ONCE(kmigrated_batch_nr)) {
-			promote_misplaced_memcg_folios(&migrate_list, cur_nid);
-			batch_count = 0;
+		if (++batch->nr > READ_ONCE(kmigrated_batch_nr)) {
+			kmigrated_batch_flush(batch);
 			cond_resched();
 		}
 out_next:
 		pfn += nr;
 	} while (pfn < end_pfn);
-	if (!list_empty(&migrate_list))
-		promote_misplaced_memcg_folios(&migrate_list, cur_nid);
+}
+
+/*
+ * Claim the next hot chunk of @ms at or after @idx, or PGHOT_SUBSECTIONS when
+ * the section has none left. The bit is cleared before its chunk is walked
+ * rather than after, so a chunk marked hot during its own walk stays marked
+ * and the PGHOT_SECTION_HOT_BIT it re-arms brings kmigrated back to it.
+ *
+ * The bitmap is re-located under RCU on every call because kmigrated_walk_zone()
+ * sleeps and the hot_map can be freed by a memory offline in between.
+ */
+static unsigned long kmigrated_claim_subsection(struct mem_section *ms,
+						unsigned long idx)
+{
+	struct pghot_hot_map *hot_map;
+
+	guard(rcu)();
+
+	hot_map = rcu_dereference(ms->hot_map);
+	if (!hot_map)
+		return PGHOT_SUBSECTIONS;
+
+	idx = find_next_bit(hot_map->hot_subsections, PGHOT_SUBSECTIONS, idx);
+	if (idx < PGHOT_SUBSECTIONS)
+		clear_bit(idx, hot_map->hot_subsections);
+
+	return idx;
 }
 
 static void kmigrated_do_work(pg_data_t *pgdat)
 {
-	unsigned long section_nr, s_begin, start_pfn;
+	unsigned long section_nr, s_begin, start_pfn, idx;
 	struct pghot_hot_map *hot_map;
+	struct kmigrated_batch batch;
 	struct mem_section *ms;
 	bool hot;
 	int nid;
 
 	clear_bit(PGDAT_KMIGRATED_ACTIVATE, &pgdat->flags);
+	kmigrated_batch_init(&batch);
 	s_begin = next_present_section_nr(-1);
 	for_each_present_section_nr(s_begin, section_nr) {
 		/*
-		 * A single walk is bounded by PAGES_PER_SECTION, but a node can
-		 * have many hot sections; yield once per section so a pass that
+		 * A single walk is bounded by one chunk, but a node can have
+		 * many hot sections; yield once per section so a pass that
 		 * migrates nothing (all pages skipped) can't hog the CPU on
-		 * non-preemptible kernels. Migration-heavy sections additionally
-		 * reschedule at each batch flush in kmigrated_walk_zone().
+		 * non-preemptible kernels. Migration-heavy sections
+		 * additionally reschedule at each batch flush in
+		 * kmigrated_walk_zone().
 		 */
 		cond_resched();
 
@@ -472,9 +543,21 @@ static void kmigrated_do_work(pg_data_t *pgdat)
 		if (!hot)
 			continue;
 
-		kmigrated_walk_zone(start_pfn, start_pfn + PAGES_PER_SECTION,
-				    pgdat->node_id);
+		for (idx = 0; idx < PGHOT_SUBSECTIONS; idx++) {
+			unsigned long chunk_pfn;
+
+			idx = kmigrated_claim_subsection(ms, idx);
+			if (idx >= PGHOT_SUBSECTIONS)
+				break;
+
+			chunk_pfn = start_pfn + (idx << PGHOT_SUBSECTION_SHIFT);
+			kmigrated_walk_zone(chunk_pfn,
+					    chunk_pfn + PGHOT_SUBSECTION_PAGES,
+					    pgdat->node_id, &batch);
+			cond_resched();
+		}
 	}
+	kmigrated_batch_flush(&batch);
 }
 
 static inline bool kmigrated_work_requested(pg_data_t *pgdat)
