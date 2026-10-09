@@ -490,6 +490,57 @@ static inline int copy_mc_highpage(struct page *to, struct page *from)
 }
 #endif
 
+/**
+ * copy_mc_highpages() - copy a page range with machine check handling
+ * @to: first destination page
+ * @from: first source page
+ * @nr_pages: number of pages
+ *
+ * Range variant of copy_mc_highpage(). On a machine check, the poisoned
+ * source page is queued for memory_failure().
+ *
+ * Context: Process context. May sleep.
+ * Return: 0 on success, -EHWPOISON if a machine check was handled.
+ */
+static inline int copy_mc_highpages(struct page *to, struct page *from,
+		unsigned long nr_pages)
+{
+	unsigned long len = nr_pages << PAGE_SHIFT;
+	unsigned long i, ret;
+
+	might_sleep();
+
+	/*
+	 * When copying we want to operate on the largest extent possible to
+	 * allow for architecture specific extent based optimizations.
+	 *
+	 * copy_mc_to_kernel() does not call cond_resched(). That is fine on
+	 * preemptible kernels, where the scheduler can preempt the copy at
+	 * any point, so copy the whole range at once if copy_mc_to_kernel() is
+	 * available and the pages are in the linear map. Otherwise, copy one
+	 * page at a time and reschedule in between.
+	 */
+	if (IS_ENABLED(CONFIG_ARCH_HAS_COPY_MC) && IS_ENABLED(CONFIG_PREEMPTION) &&
+	    !IS_ENABLED(CONFIG_HIGHMEM)) {
+		ret = copy_mc_to_kernel(page_address(to), page_address(from), len);
+		if (ret) {
+			memory_failure_queue(page_to_pfn(from) +
+					     ((len - ret) >> PAGE_SHIFT), 0);
+			return -EHWPOISON;
+		}
+		for (i = 0; i < nr_pages; i++)
+			kmsan_copy_page_meta(to + i, from + i);
+		return 0;
+	}
+
+	for (i = 0; i < nr_pages; i++) {
+		cond_resched();
+		if (copy_mc_highpage(to + i, from + i))
+			return -EHWPOISON;
+	}
+	return 0;
+}
+
 static inline void memcpy_page(struct page *dst_page, size_t dst_off,
 			       struct page *src_page, size_t src_off,
 			       size_t len)
