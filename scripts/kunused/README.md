@@ -193,6 +193,12 @@ because such files sometimes generate code that calls it (the xe driver's
 `.rules` files do) but more often mention it by coincidence. Files under
 `Documentation/` don't count at all.
 
+Some objects have every symbol renamed by `objcopy --prefix-symbols`:
+early boot code (`__pi_`), the arm64 and riscv EFI stub (`__efistub_`),
+the arm64 nVHE hypervisor (`__kvm_nvhe_`). Assembly then calls `foo` in
+them as `__pi_foo`. kunused reads the prefixes from the Makefiles and
+counts `PREFIX + foo` as a use of `foo`.
+
 The scan for non-static code covers the whole tree except `tools/`,
 `samples/`, `scripts/`, `rust/` and `usr/`. Code there is userspace, host
 tools or Rust glue, whose functions are called by name from places this

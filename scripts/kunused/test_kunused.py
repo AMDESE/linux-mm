@@ -441,6 +441,18 @@ void m(void) { used_var = 1; }
     "mm/ops.c": r'''
 const int myname_prog_ops = 1;
 ''',
+    "mm/pi.c": r'''
+int ext_pi_user(void)
+{
+	return 0;
+}
+''',
+    "arch/x86/kernel/head.S": r'''
+	call	__pi_ext_pi_user
+''',
+    "arch/x86/boot/startup/Makefile": r'''
+$(obj)/%.pi.o: OBJCOPYFLAGS := --prefix-symbols=__pi_
+''',
     "mm/caller.c": r'''
 void c(int x)
 {
@@ -558,6 +570,7 @@ EXPECT_EXTERN = {
     "ext_ternary_user": False, "ext_plus_user": False,
     "ext_case_user": False, "ext_wrapped": False, "ext_after_comment": True,
     "ext_after_macro": True, "ext_rules_user": "non-c?",
+    "ext_pi_user": False,
 }
 
 

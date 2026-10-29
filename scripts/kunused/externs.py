@@ -13,7 +13,7 @@ import re
 from multiprocessing import Pool
 
 from candidates import Candidate
-from source import IDENT_RE, lex, line_of, read
+from source import IDENT_RE, idents, lex, line_of, read
 
 # Names seen more often than this are not worth grepping for.
 MAX_TOKENS = 10
@@ -137,11 +137,11 @@ def _grep_file(path):
         raw = read(path)
     except OSError:
         return []
-    if not _names.intersection(IDENT_RE.findall(raw)):
+    if not _names.intersection(idents(raw)):
         return []
     return [(name, f"{path}:{n}:{line}", declares(line, name))
             for n, line in enumerate(raw.split("\n"), 1)
-            for name in _names.intersection(IDENT_RE.findall(line))]
+            for name in _names.intersection(idents(line))]
 
 
 def grep(files, names, jobs=None):

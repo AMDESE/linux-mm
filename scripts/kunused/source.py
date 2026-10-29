@@ -14,6 +14,10 @@ EXCLUDE = ("Documentation/", "scripts/kunused/")
 # just has its identifiers counted.
 SRC_EXT = (".c", ".h", ".S", ".rs", ".lds", ".dts", ".dtsi",
            ".tbl", ".asn1", ".inc", ".uc", ".j2")
+# objcopy --prefix-symbols renames every symbol of some objects (early boot
+# code, the EFI stub, the arm64 nVHE hypervisor), so assembly and linker
+# scripts reach NAME in them as PREFIX + NAME.
+PREFIX_SYMBOLS_RE = re.compile(r"--prefix-symbols=([A-Za-z_]\w*)")
 # How many '##' steps deep a pasted macro argument is looked for.
 MAX_PIECE_DEPTH = 2
 
@@ -161,6 +165,42 @@ def splits(pieces, name):
     return out
 
 
+@functools.lru_cache(maxsize=None)
+def sym_prefixes():
+    """Every objcopy --prefix-symbols prefix the tree's Makefiles use,
+    longest first."""
+    r = subprocess.run(["git", "grep", "-h", "-o", "-E", "-e",
+                        PREFIX_SYMBOLS_RE.pattern.replace(r"\w", "[A-Za-z0-9_]"),
+                        "--", "*Makefile*", "*Kbuild*", "*.mk"],
+                       capture_output=True, text=True)
+    found = {m.group(1) for m in PREFIX_SYMBOLS_RE.finditer(r.stdout)}
+    return tuple(sorted(found, key=len, reverse=True))
+
+
+def unprefixed(tok):
+    """NAME for PREFIX + NAME, else None."""
+    for p in sym_prefixes():
+        if tok.startswith(p) and len(tok) > len(p):
+            return tok[len(p):]
+    return None
+
+
+def count_idents(text):
+    """Identifier counts, with PREFIX + NAME also counted as NAME."""
+    cnt = Counter(IDENT_RE.findall(text))
+    for tok, n in list(cnt.items()):
+        name = unprefixed(tok)
+        if name:
+            cnt[name] += n
+    return cnt
+
+
+def idents(text):
+    """Set of identifiers in 'text', with NAME for each PREFIX + NAME."""
+    words = set(IDENT_RE.findall(text))
+    return words | {n for n in map(unprefixed, words) if n}
+
+
 def scan_file(path):
     """(path, token counts, inline defs, '#define' names, paste templates).
 
@@ -175,7 +215,7 @@ def scan_file(path):
     if "\0" in text:
         return path, Counter(), [], Counter(), set()
     if not path.endswith(SRC_EXT):
-        return path, Counter(IDENT_RE.findall(text)), [], Counter(), set()
+        return path, count_idents(text), [], Counter(), set()
     text = lex(text)
 
     pastes = paste_templates(text, path) if "##" in text else set()
@@ -191,7 +231,7 @@ def scan_file(path):
         body = brace_body(text, m.end() - 1)
         defs.append((m.group(1), line_of(text, m.start(1)),
                      Counter(IDENT_RE.findall(body))))
-    return path, Counter(IDENT_RE.findall(text)), defs, macros, pastes
+    return path, count_idents(text), defs, macros, pastes
 
 
 def tree_files():
