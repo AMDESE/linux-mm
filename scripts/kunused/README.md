@@ -287,14 +287,25 @@ compiled.
 candidate's body (expected), `EXPORT_SYMBOL` lines (expected), and real
 uses (the scanner was wrong). The warning message carries the
 candidate's name, so a use is still attributed correctly when a macro
-renames the symbol. `check` reads kbuild's `.*.cmd` files to tell which
-candidates were in compiled files at all.
+renames the symbol.
 
-"Verified" therefore means three things together. The scanner found
+The compiler only sees C. A call from assembly, from an inline asm
+string or under an objcopy prefix never triggers the mark, so `check`
+also runs `nm -u` on every object the build made (`$NM`, `llvm-nm` with
+`LLVM=1`, else `${CROSS_COMPILE}nm`). A function or variable that some
+object links against is a real use, and the report shows the line in the
+`.c` or `.S` file. Prefixed names and the clones the compiler makes
+(`foo.part.0`, `.isra.0`, `.constprop.0`, `.cold`, `.llvm.N`) count as
+`foo`; an object that only exports it does not count. Run `check` before
+deleting the build directory. `check` reads kbuild's `.*.cmd` files to
+tell which candidates were in compiled files at all.
+
+"Verified" therefore means four things together. The scanner found
 no use anywhere in the tree, for any config or architecture. Every `##`
 macro that could build the name was followed to its callers, again
-across the whole tree. And the compiler saw no use in the code this
-config builds, which catches anything the first two missed there. A
+across the whole tree. The compiler saw no use in the code this config
+builds, which catches anything the first two missed there. And no
+object this config builds links against it. A
 build can't see uses from Makefiles or scripts, nor a `##` use in code
 it didn't compile, so `[non-c?]` and `[paste?]` candidates stay in
 "check by hand" even when the build saw nothing.
@@ -356,8 +367,9 @@ before sending patches.
 ## Known limits
 
 - **Names built from pieces:** a stringified name looked up at runtime,
-  or a symbol referenced from a linker script or assembly under a
-  different name. A macro such as `#define foo bar` also hides callers
+  or a symbol referenced from a linker script, or from assembly that is
+  not built, under a different name (assembly macros that paste names
+  with `\()`, for example). A macro such as `#define foo bar` also hides callers
   that use `bar`. For `##`, only templates with some fixed text are
   followed: a call through an all-parameter paste such as
   `__PASTE(foo_, bar)()` is not seen by the scan. The build catches

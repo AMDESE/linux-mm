@@ -4,6 +4,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import report                                                # noqa: E402
+import source                                                # noqa: E402
 import verify                                                # noqa: E402
 from candidates import Candidate, read_tsv                    # noqa: E402
 from maintainers import Maintainers                           # noqa: E402
@@ -726,6 +728,50 @@ class TestSplits(unittest.TestCase):
             verify.merge([x86, dict(rv, commit="def")])
 
 
+@unittest.skipUnless(shutil.which("gcc") and shutil.which("nm"),
+                     "needs gcc and nm")
+class TestLinkRefs(unittest.TestCase):
+    """Uses only an object's undefined symbols can show: assembly calls,
+    objcopy prefixes and compiler clones."""
+
+    def test_link_refs(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, build = os.path.join(d, "src"), os.path.join(d, "build")
+            srcs = {
+                "Makefile": "OBJCOPYFLAGS := --prefix-symbols=__pi_\n",
+                "arch/x/head.S": "\tcall __pi_lk_pi_fn\n"
+                                 "\tcall lk_clone_fn.part.0\n",
+                "mm/exp.c": "#define EXPORT_SYMBOL(x) void *__ex_##x = "
+                            "(void *)&x\n"
+                            "extern int lk_exp_fn(void); "
+                            "EXPORT_SYMBOL(lk_exp_fn);\n",
+            }
+            for path, body in srcs.items():
+                os.makedirs(os.path.dirname(os.path.join(root, path)),
+                            exist_ok=True)
+                with open(os.path.join(root, path), "w") as f:
+                    f.write(body)
+                if path.endswith((".c", ".S")):
+                    obj = os.path.join(build, path[:-2] + ".o")
+                    os.makedirs(os.path.dirname(obj), exist_ok=True)
+                    subprocess.run(["gcc", "-c", os.path.join(root, path),
+                                    "-o", obj], check=True)
+            git(root, "init", "-q")
+            git(root, "add", ".")
+            git(root, "commit", "-qm", "fixture")
+            cwd = os.getcwd()
+            os.chdir(root)
+            source.sym_prefixes.cache_clear()
+            try:
+                got = verify.link_refs(root, build, {
+                    "lk_pi_fn", "lk_clone_fn", "lk_exp_fn", "lk_none"})
+            finally:
+                os.chdir(cwd)
+                source.sym_prefixes.cache_clear()
+            self.assertEqual(sorted(got), ["lk_clone_fn", "lk_pi_fn"])
+            self.assertEqual(got["lk_pi_fn"][0], "arch/x/head.S:1")
+
+
 class TestVerify(Fixture):
     def test_mark_and_check(self):
         wt = os.path.join(self.tree, ".wt")
@@ -789,7 +835,7 @@ class TestVerify(Fixture):
 
         self.assertEqual(res["build"], "Linux/x86 7.0.0")
         self.assertEqual(res["warnings"],
-                         {"chain": 1, "export": 1, "real_use": 2})
+                         {"chain": 1, "export": 1, "real_use": 2, "link": 0})
         self.assertEqual(list(res["real_use"]),
                          ["ext_after_comment", "ext_stub"])
         self.assertEqual(res["real_use"]["ext_stub"][0], "mm/caller.c:4")

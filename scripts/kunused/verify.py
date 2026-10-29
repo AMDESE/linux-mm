@@ -12,15 +12,19 @@ warnings allowed, the compiler has reported every reference it compiled.
   export    an EXPORT_SYMBOL*() line (expected)
   real use  anything else: the scanner was wrong about that name
 
-and works out which candidates live in files the build compiled at all.
+The compiler never sees assembly, inline asm strings or objects renamed
+by objcopy, so 'check' also reads every object's undefined symbols: a
+candidate another object links against is a real use too.  It then works
+out which candidates live in files the build compiled at all.
 """
 import json
 import os
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 import externs
-from source import brace_body, lex, tree_files
+from source import brace_body, lex, tree_files, unprefixed
 
 TAG = "KUNUSED"
 # Every mark starts with MARK; the message names the candidate, since a
@@ -167,6 +171,73 @@ def compiled_files(root, build):
     return {_norm(root, build, t) for t in raw}
 
 
+def nm_tool():
+    if os.environ.get("NM"):
+        return os.environ["NM"]
+    if os.environ.get("LLVM"):
+        return "llvm-nm"
+    return os.environ.get("CROSS_COMPILE", "") + "nm"
+
+
+def _undefined(objs):
+    r = subprocess.run([nm_tool(), "-A", "-u", "--no-sort", *objs],
+                       capture_output=True, text=True, errors="replace")
+    out = []
+    for line in r.stdout.splitlines():
+        f = line.split()
+        if len(f) >= 2 and f[0].endswith(":"):
+            out.append((f[0][:-1], f[-1]))
+    return out
+
+
+def object_source(root, build, obj):
+    """The .c or .S an object was built from: foo.o, or foo.pi.o after
+    objcopy.  None for linked and generated objects."""
+    rel = os.path.relpath(obj, build)[:-2]
+    for base in (rel, rel.rsplit(".", 1)[0]):
+        for ext in (".c", ".S"):
+            if os.path.isfile(os.path.join(root, base + ext)):
+                return base + ext
+    return None
+
+
+def link_refs(root, build, names):
+    """{name: (location, code)} for each of 'names' that some object
+    references without defining it: a call or load from assembly, inline
+    asm or another object, none of which the deprecated mark can see.
+    PREFIX + NAME from objcopy --prefix-symbols and the NAME.part.0,
+    .isra.0, .constprop.0, .cold, .llvm.N clones count as NAME.  A line
+    that only exports the symbol does not count."""
+    objs = []
+    for d, _, files in os.walk(build):
+        objs += [os.path.join(d, f) for f in files if f.endswith(".o") and
+                 not f.endswith(".mod.o") and f != ".vmlinux.export.o"]
+    with ThreadPoolExecutor(os.cpu_count()) as ex:
+        found = [r for rs in ex.map(_undefined, [objs[i:i + 256] for i in
+                                                range(0, len(objs), 256)])
+                 for r in rs]
+    names, out = set(names), {}
+    for obj, sym in found:
+        base = sym.split(".", 1)[0]
+        name = base if base in names else unprefixed(base)
+        if name not in names or name in out:
+            continue
+        src = object_source(root, build, obj)
+        if not src:
+            continue
+        with open(os.path.join(root, src), errors="replace") as f:
+            lines = f.read().split("\n")
+        hits = [(i, l.strip()) for i, l in enumerate(lines, 1)
+                if re.search(rf"\b(?:{re.escape(base)}|{re.escape(name)})\b",
+                             l)]
+        if hits and all("EXPORT_SYMBOL" in code for _, code in hits):
+            continue
+        uses = [h for h in hits if "EXPORT_SYMBOL" not in h[1]]
+        out[name] = ((f"{src}:{uses[0][0]}", uses[0][1]) if uses else
+                     (src, f"references {sym}"))
+    return out
+
+
 def build_name(build):
     """'Linux/x86 7.3.0-rc7' from the .config header, if there is one."""
     try:
@@ -221,6 +292,12 @@ def check(worktree, build, log):
             else:
                 real.setdefault(name, []).append((f"{path}:{ln}", code))
 
+    linked = link_refs(root, build, {n for n, ms in by_name.items()
+                                     if ms[0]["kind"] != "inline"} - set(real))
+    for name, use in linked.items():
+        real.setdefault(name, []).append(use)
+    counts["link"] = len(linked)
+
     files = compiled_files(root, build)
     built = {n for n, ms in by_name.items() if any(m["file"] in files
                                                     for m in ms)}
@@ -268,5 +345,5 @@ def merge(results):
         "not_built": sorted(set.intersection(*(set(r["not_built"])
                                                for r in results))),
         "warnings": {k: sum(r["warnings"].get(k, 0) for r in results)
-                     for k in ("chain", "export", "real_use")},
+                     for k in ("chain", "export", "real_use", "link")},
     }
