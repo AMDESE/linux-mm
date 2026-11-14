@@ -7134,7 +7134,6 @@ static int __alloc_contig_migrate_range(struct compact_control *cc,
 	struct migration_target_control mtc = {
 		.nid = zone_to_nid(cc->zone),
 		.gfp_mask = cc->gfp_mask,
-		.reason = MR_CONTIG_RANGE,
 	};
 
 	lru_cache_disable();

@@ -1236,7 +1236,12 @@ struct migration_target_control {
 	int nid;		/* preferred node id */
 	nodemask_t *nmask;
 	gfp_t gfp_mask;
-	enum migrate_reason reason;
+	/*
+	 * If no free hugetlb folio is available, allow allocating a new one on
+	 * a node other than @nid.  That can break the per-node hugetlb pool,
+	 * so only callers with no better choice set it.
+	 */
+	bool allow_hugetlb_fallback;
 };
 
 /*

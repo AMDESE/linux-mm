@@ -2233,7 +2233,7 @@ struct folio *alloc_migration_target(struct folio *src, unsigned long private)
 		gfp_mask = htlb_modify_alloc_mask(h, gfp_mask);
 		return alloc_hugetlb_folio_nodemask(h, nid,
 						mtc->nmask, gfp_mask,
-						htlb_allow_alloc_fallback(mtc->reason));
+						mtc->allow_hugetlb_fallback);
 	}
 
 	if (folio_test_large(src)) {
@@ -2270,7 +2270,7 @@ static int do_move_pages_to_node(struct list_head *pagelist, int node)
 	struct migration_target_control mtc = {
 		.nid = node,
 		.gfp_mask = GFP_HIGHUSER_MOVABLE | __GFP_THISNODE,
-		.reason = MR_SYSCALL,
+		.allow_hugetlb_fallback = true,
 	};
 
 	err = migrate_pages(pagelist, alloc_migration_target, NULL,

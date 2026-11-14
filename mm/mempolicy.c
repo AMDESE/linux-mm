@@ -1309,7 +1309,7 @@ static long migrate_to_node(struct mm_struct *mm, int source, int dest,
 	struct migration_target_control mtc = {
 		.nid = dest,
 		.gfp_mask = GFP_HIGHUSER_MOVABLE | __GFP_THISNODE,
-		.reason = MR_SYSCALL,
+		.allow_hugetlb_fallback = true,
 	};
 
 	nodes_clear(nmask);
@@ -1470,8 +1470,8 @@ static struct folio *alloc_migration_target_by_mpol(struct folio *src,
 		h = folio_hstate(src);
 		gfp = htlb_alloc_mask(h);
 		nodemask = policy_nodemask(gfp, pol, ilx, &nid);
-		return alloc_hugetlb_folio_nodemask(h, nid, nodemask, gfp,
-				htlb_allow_alloc_fallback(MR_MEMPOLICY_MBIND));
+		/* An explicit mbind() may break the per-node hugetlb pool. */
+		return alloc_hugetlb_folio_nodemask(h, nid, nodemask, gfp, true);
 	}
 
 	if (folio_test_large(src))

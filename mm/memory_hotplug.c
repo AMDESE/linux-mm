@@ -1912,7 +1912,7 @@ put_folio:
 		struct migration_target_control mtc = {
 			.nmask = &nmask,
 			.gfp_mask = GFP_KERNEL | __GFP_MOVABLE | __GFP_RETRY_MAYFAIL,
-			.reason = MR_MEMORY_HOTPLUG,
+			.allow_hugetlb_fallback = true,
 		};
 		int ret;
 

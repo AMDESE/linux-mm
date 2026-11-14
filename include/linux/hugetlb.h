@@ -996,30 +996,6 @@ static inline gfp_t htlb_modify_alloc_mask(struct hstate *h, gfp_t gfp_mask)
 	return modified_mask;
 }
 
-static inline bool htlb_allow_alloc_fallback(enum migrate_reason reason)
-{
-	bool allowed_fallback = false;
-
-	/*
-	 * Note: the memory offline, memory failure and migration syscalls will
-	 * be allowed to fallback to other nodes due to lack of a better chioce,
-	 * that might break the per-node hugetlb pool. While other cases will
-	 * set the __GFP_THISNODE to avoid breaking the per-node hugetlb pool.
-	 */
-	switch (reason) {
-	case MR_MEMORY_HOTPLUG:
-	case MR_MEMORY_FAILURE:
-	case MR_SYSCALL:
-	case MR_MEMPOLICY_MBIND:
-		allowed_fallback = true;
-		break;
-	default:
-		break;
-	}
-
-	return allowed_fallback;
-}
-
 static inline spinlock_t *huge_pte_lockptr(struct hstate *h,
 					   struct mm_struct *mm, pte_t *pte)
 {
@@ -1276,11 +1252,6 @@ static inline gfp_t htlb_alloc_mask(struct hstate *h)
 static inline gfp_t htlb_modify_alloc_mask(struct hstate *h, gfp_t gfp_mask)
 {
 	return 0;
-}
-
-static inline bool htlb_allow_alloc_fallback(enum migrate_reason reason)
-{
-	return false;
 }
 
 static inline spinlock_t *huge_pte_lockptr(struct hstate *h,

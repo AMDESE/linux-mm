@@ -1114,7 +1114,6 @@ static unsigned int demote_folio_list(struct list_head *demote_folios,
 		.gfp_mask = (GFP_HIGHUSER_MOVABLE & ~__GFP_RECLAIM) |
 			__GFP_NOMEMALLOC | GFP_NOWAIT,
 		.nmask = &allowed_mask,
-		.reason = MR_DEMOTION,
 	};
 
 	if (list_empty(demote_folios))
