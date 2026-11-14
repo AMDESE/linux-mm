@@ -29,4 +29,18 @@ enum migrate_reason {
 	MR_TYPES
 };
 
+/**
+ * struct migrate_control - Policy for one migration request
+ * @mode: How long migration may block.
+ * @reason: Why migration was requested.
+ *
+ * The caller builds this on its stack and the migration core passes it down
+ * read-only.  Where the core runs a pass with a weaker @mode than requested,
+ * it uses a copy with only @mode changed.
+ */
+struct migrate_control {
+	enum migrate_mode mode;
+	enum migrate_reason reason;
+};
+
 #endif		/* MIGRATE_MODE_H_INCLUDED */
