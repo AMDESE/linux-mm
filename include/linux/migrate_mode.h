@@ -1,6 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #ifndef MIGRATE_MODE_H_INCLUDED
 #define MIGRATE_MODE_H_INCLUDED
+
+#include <linux/bits.h>
+#include <linux/types.h>
+
 /*
  * MIGRATE_ASYNC means never block
  * MIGRATE_SYNC_LIGHT in the current implementation means to allow blocking
@@ -29,9 +33,20 @@ enum migrate_reason {
 	MR_TYPES
 };
 
+/*
+ * Behavior a migration request asks for that does not depend on how long
+ * migration may block.  Each flag is honored by the migration core or by
+ * ->migrate_folio(); behavior must not be derived from the reason instead.
+ */
+typedef unsigned int __bitwise migrate_flags_t;
+
+/* Do not split a large folio when its destination cannot be allocated. */
+#define MIGRATE_F_NO_SPLIT		((__force migrate_flags_t)BIT(0))
+
 /**
  * struct migrate_control - Policy for one migration request
  * @mode: How long migration may block.
+ * @flags: Requested behavior, a combination of MIGRATE_F_* flags.
  * @reason: Why migration was requested.
  *
  * The caller builds this on its stack and the migration core passes it down
@@ -40,6 +55,7 @@ enum migrate_reason {
  */
 struct migrate_control {
 	enum migrate_mode mode;
+	migrate_flags_t flags;
 	enum migrate_reason reason;
 };
 

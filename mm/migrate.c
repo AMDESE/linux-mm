@@ -1849,7 +1849,7 @@ static int migrate_pages_batch(struct list_head *from,
 	int rc, rc_saved = 0, nr_pages;
 	LIST_HEAD(unmap_folios);
 	LIST_HEAD(dst_folios);
-	bool nosplit = (ctl->reason == MR_NUMA_MISPLACED);
+	bool nosplit = ctl->flags & MIGRATE_F_NO_SPLIT;
 
 	VM_WARN_ON_ONCE(ctl->mode != MIGRATE_ASYNC &&
 			!list_empty(from) && !list_is_singular(from));
@@ -1959,7 +1959,6 @@ static int migrate_pages_batch(struct list_head *from,
 				 */
 				nr_failed++;
 				stats->nr_thp_failed += is_thp;
-				/* Large folio NUMA faulting doesn't split to retry. */
 				if (is_large && !nosplit) {
 					int ret = try_split_folio(folio, split_folios,
 								  ctl->mode);
@@ -2808,8 +2807,13 @@ int migrate_misplaced_folio(struct folio *folio, int node)
 	LIST_HEAD(migratepages);
 	struct mem_cgroup *memcg = get_mem_cgroup_from_folio(folio);
 	struct lruvec *lruvec = mem_cgroup_lruvec(memcg, pgdat);
+	/*
+	 * NUMA hinting migration is opportunistic: if the target node cannot
+	 * take a large folio, leave it intact rather than split it.
+	 */
 	const struct migrate_control ctl = {
 		.mode = MIGRATE_ASYNC,
+		.flags = MIGRATE_F_NO_SPLIT,
 		.reason = MR_NUMA_MISPLACED,
 	};
 
