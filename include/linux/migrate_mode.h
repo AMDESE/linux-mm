@@ -46,12 +46,15 @@ typedef unsigned int __bitwise migrate_flags_t;
 #define MIGRATE_F_RETRY_SPLIT		((__force migrate_flags_t)BIT(1))
 /* Keep the reference on a migrated non-hugetlb folio for the caller. */
 #define MIGRATE_F_KEEP_SRC_REF		((__force migrate_flags_t)BIT(2))
+/* Leave NR_ISOLATED_* of migrated folios alone; the caller accounts it. */
+#define MIGRATE_F_NO_ISOLATED_STAT	((__force migrate_flags_t)BIT(3))
 
 /**
  * struct migrate_control - Policy for one migration request
  * @mode: How long migration may block.
  * @flags: Requested behavior, a combination of MIGRATE_F_* flags.
- * @reason: Why migration was requested.
+ * @reason: Why migration was requested.  Only reported to tracing and
+ *	page_owner; it does not change what migration does.
  *
  * The caller builds this on its stack and the migration core passes it down
  * read-only.  Where the core runs a pass with a weaker @mode than requested,

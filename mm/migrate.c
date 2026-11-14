@@ -1223,7 +1223,7 @@ static void migrate_folio_done(struct folio *src,
 			       const struct migrate_control *ctl)
 {
 	if (likely(!page_has_movable_ops(&src->page)) &&
-	    ctl->reason != MR_DEMOTION)
+	    !(ctl->flags & MIGRATE_F_NO_ISOLATED_STAT))
 		mod_node_page_state(folio_pgdat(src), NR_ISOLATED_ANON +
 				    folio_is_file_lru(src), -folio_nr_pages(src));
 

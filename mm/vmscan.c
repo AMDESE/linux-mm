@@ -1115,8 +1115,10 @@ static unsigned int demote_folio_list(struct list_head *demote_folios,
 			__GFP_NOMEMALLOC | GFP_NOWAIT,
 		.nmask = &allowed_mask,
 	};
+	/* The reclaim caller owns the NR_ISOLATED_* accounting. */
 	const struct migrate_control ctl = {
 		.mode = MIGRATE_ASYNC,
+		.flags = MIGRATE_F_NO_ISOLATED_STAT,
 		.reason = MR_DEMOTION,
 	};
 
