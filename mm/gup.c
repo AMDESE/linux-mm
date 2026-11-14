@@ -2371,10 +2371,13 @@ migrate_longterm_unpinnable_folios(struct list_head *movable_folio_list,
 			.nid = NUMA_NO_NODE,
 			.gfp_mask = GFP_USER | __GFP_NOWARN,
 		};
+		const struct migrate_control ctl = {
+			.mode = MIGRATE_SYNC,
+			.reason = MR_LONGTERM_PIN,
+		};
 
 		if (migrate_pages(movable_folio_list, alloc_migration_target,
-				  NULL, (unsigned long)&mtc, MIGRATE_SYNC,
-				  MR_LONGTERM_PIN, NULL)) {
+				  NULL, (unsigned long)&mtc, &ctl, NULL)) {
 			ret = -ENOMEM;
 			goto err;
 		}
