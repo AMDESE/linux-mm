@@ -2371,8 +2371,10 @@ migrate_longterm_unpinnable_folios(struct list_head *movable_folio_list,
 			.nid = NUMA_NO_NODE,
 			.gfp_mask = GFP_USER | __GFP_NOWARN,
 		};
+		/* A transient extra reference should not fail the pin. */
 		const struct migrate_control ctl = {
 			.mode = MIGRATE_SYNC,
+			.flags = MIGRATE_F_RETRY_SPLIT,
 			.reason = MR_LONGTERM_PIN,
 		};
 

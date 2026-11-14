@@ -42,6 +42,8 @@ typedef unsigned int __bitwise migrate_flags_t;
 
 /* Do not split a large folio when its destination cannot be allocated. */
 #define MIGRATE_F_NO_SPLIT		((__force migrate_flags_t)BIT(0))
+/* Retry that split in a later pass, rather than fail, on -EAGAIN. */
+#define MIGRATE_F_RETRY_SPLIT		((__force migrate_flags_t)BIT(1))
 
 /**
  * struct migrate_control - Policy for one migration request

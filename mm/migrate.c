@@ -1967,7 +1967,7 @@ static int migrate_pages_batch(struct list_head *from,
 						stats->nr_thp_split += is_thp;
 						stats->nr_split++;
 						break;
-					} else if (ctl->reason == MR_LONGTERM_PIN &&
+					} else if ((ctl->flags & MIGRATE_F_RETRY_SPLIT) &&
 						   ret == -EAGAIN) {
 						/*
 						 * Try again to split large folio to
