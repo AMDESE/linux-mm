@@ -2899,8 +2899,10 @@ static int soft_offline_in_use_page(struct page *page)
 		.gfp_mask = GFP_USER | __GFP_MOVABLE | __GFP_RETRY_MAYFAIL,
 		.allow_hugetlb_fallback = true,
 	};
+	/* page_handle_poison() drops the reference on a migrated page. */
 	const struct migrate_control ctl = {
 		.mode = MIGRATE_SYNC,
+		.flags = MIGRATE_F_KEEP_SRC_REF,
 		.reason = MR_MEMORY_FAILURE,
 	};
 

@@ -44,6 +44,8 @@ typedef unsigned int __bitwise migrate_flags_t;
 #define MIGRATE_F_NO_SPLIT		((__force migrate_flags_t)BIT(0))
 /* Retry that split in a later pass, rather than fail, on -EAGAIN. */
 #define MIGRATE_F_RETRY_SPLIT		((__force migrate_flags_t)BIT(1))
+/* Keep the reference on a migrated non-hugetlb folio for the caller. */
+#define MIGRATE_F_KEEP_SRC_REF		((__force migrate_flags_t)BIT(2))
 
 /**
  * struct migrate_control - Policy for one migration request

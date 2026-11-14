@@ -1227,8 +1227,7 @@ static void migrate_folio_done(struct folio *src,
 		mod_node_page_state(folio_pgdat(src), NR_ISOLATED_ANON +
 				    folio_is_file_lru(src), -folio_nr_pages(src));
 
-	if (ctl->reason != MR_MEMORY_FAILURE)
-		/* We release the page in page_handle_poison. */
+	if (!(ctl->flags & MIGRATE_F_KEEP_SRC_REF))
 		folio_put(src);
 }
 
