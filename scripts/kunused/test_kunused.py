@@ -259,6 +259,12 @@ int ext_after_comment(void)
 {
 	return 0;
 }
+
+int ext_ns_exported(void)
+{
+	return 0;
+}
+EXPORT_SYMBOL_NS_GPL(ext_ns_exported, "E");
 ''',
     "mm/paste.c": r'''
 #define CALL(x) ext_paste_##x()
@@ -572,7 +578,7 @@ EXPECT_EXTERN = {
     "ext_ternary_user": False, "ext_plus_user": False,
     "ext_case_user": False, "ext_wrapped": False, "ext_after_comment": True,
     "ext_after_macro": True, "ext_rules_user": "non-c?",
-    "ext_pi_user": False,
+    "ext_pi_user": False, "ext_ns_exported": "exported",
 }
 
 
@@ -991,6 +997,206 @@ class TestRun(Fixture):
                          subprocess.run(["git", "worktree", "list"],
                                         cwd=self.tree, capture_output=True,
                                         text=True).stdout)
+
+
+EXPORT_TREE = {
+    "include/linux/x.h": "int xp_wrapped(void);\n"
+                         "static inline int xp_wrap(void) "
+                         "{ return xp_wrapped(); }\n",
+    "kernel/x.c": "#include <linux/x.h>\n"
+                  "int xp_needed(void) { return 0; }\n"
+                  "EXPORT_SYMBOL_GPL(xp_needed);\n"
+                  "int xp_lost(void) { return 0; }\n"
+                  "EXPORT_SYMBOL_GPL(xp_lost);\n"
+                  "int xp_builtin(void) { return 0; }\n"
+                  "EXPORT_SYMBOL(xp_builtin);\n"
+                  "int xp_unused(void) { return 0; }\n"
+                  "EXPORT_SYMBOL_NS_GPL(xp_unused, \"X\");\n"
+                  "int xp_got(void) { return 0; }\n"
+                  "EXPORT_SYMBOL(xp_got);\n"
+                  "int xp_wrapped(void) { return 0; }\n"
+                  "EXPORT_SYMBOL(xp_wrapped);\n"
+                  "int xp_new(void) { return 0; }\n",
+    "kernel/user.c": "int xp_builtin(void);\nint xp_new(void);\n"
+                     "int u(void) { return xp_builtin() + xp_new(); }\n",
+    "drivers/a/a.c": "int xp_needed(void);\nint xp_lost(void);\n"
+                     "int a(void) { return xp_needed() + xp_lost(); }\n",
+    "drivers/b/b.c": "void *b(void) { return symbol_get(xp_got); }\n",
+}
+# What the fixture build compiles in place of the real kernel headers.
+EXPORT_H = r'''
+#define __EXPORT(s) asm(".section .export_symbol,\"a\"\n__export_symbol_" \
+			#s ":\n.asciz \"\"\n.previous");
+#define EXPORT_SYMBOL(s) __EXPORT(s)
+#define EXPORT_SYMBOL_GPL(s) __EXPORT(s)
+#define EXPORT_SYMBOL_NS_GPL(s, ns) __EXPORT(s)
+void *__symbol_get(const char *);
+#define symbol_get(x) ({ static const char __n[] \
+	__attribute__((used, section(".no_trim_symbol"))) = #x; \
+	__symbol_get(#x); })
+'''
+
+
+class TestExports(unittest.TestCase):
+    """Exports no module imports, from real objects of a fixture build."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.root = os.path.join(cls.tmp.name, "src")
+        cls.build = os.path.join(cls.tmp.name, "build")
+        for path, body in EXPORT_TREE.items():
+            for d in (cls.root, cls.build):
+                os.makedirs(os.path.dirname(os.path.join(d, path)),
+                            exist_ok=True)
+            with open(os.path.join(cls.root, path), "w") as f:
+                f.write(body)
+        b = cls.build
+        with open(os.path.join(b, "export.h"), "w") as f:
+            f.write(EXPORT_H)
+        with open(os.path.join(b, ".config"), "w") as f:
+            f.write("# Linux/x86 7.0.0 Kernel Configuration\n")
+        os.symlink(cls.root, os.path.join(b, "source"))
+        for path in EXPORT_TREE:
+            if path.endswith(".c"):
+                subprocess.run(["gcc", "-c", "-include",
+                                os.path.join(b, "export.h"), "-I",
+                                os.path.join(cls.root, "include"),
+                                os.path.join(cls.root, path), "-o",
+                                os.path.join(b, path[:-2] + ".o")],
+                               check=True)
+        subprocess.run(["ld", "-r", "-o", "vmlinux.o", "kernel/x.o",
+                        "kernel/user.o"], cwd=b, check=True)
+        with open(os.path.join(b, "modules.order"), "w") as f:
+            f.write("drivers/a/a.o\ndrivers/b/b.o\n")
+        for m in ("drivers/a/a", "drivers/b/b"):
+            with open(os.path.join(b, m + ".mod"), "w") as f:
+                f.write(m + ".o\n")
+        git(cls.root, "init", "-q")
+        git(cls.root, "add", ".")
+        git(cls.root, "commit", "-qm", "fixture")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def run_kunused(self, *args):
+        return subprocess.run([sys.executable, KUNUSED, "-C", self.root,
+                               *args], capture_output=True, text=True)
+
+    def test_1_collect(self):
+        save = os.path.join(self.tmp.name, "x.json")
+        r = self.run_kunused("exports", self.build, "--save", save, "-o",
+                             os.path.join(self.tmp.name, "x.tsv"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(save) as f:
+            data = json.load(f)
+        self.assertEqual(data["build"], "Linux/x86 7.0.0")
+        self.assertEqual(data["exports"]["xp_needed"], "vmlinux")
+        self.assertEqual(data["imports"]["xp_needed"], ["drivers/a/a"])
+        self.assertEqual(data["imports"]["xp_got"],
+                         ["drivers/b/b (symbol_get)"])
+        self.assertEqual(data["modules"]["drivers/a/a"], ["drivers/a/a.c"])
+        self.assertIn("kernel/user.c", data["built"])
+
+    def test_2_exports(self):
+        out = os.path.join(self.tmp.name, "x.tsv")
+        r = self.run_kunused("exports", self.build, "-o", out)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(out) as f:
+            rows = {l.split("\t")[1]: l.rstrip("\n").split("\t")
+                    for l in f if not l.startswith("#")}
+        self.assertEqual(sorted(rows), ["xp_builtin", "xp_unused",
+                                        "xp_wrapped"])
+        self.assertEqual(rows["xp_builtin"][0], "unexport")
+        self.assertEqual(rows["xp_builtin"][3], "kernel/x.c:7")
+        self.assertEqual(rows["xp_builtin"][4], "kernel/user.c:3")
+        self.assertEqual(rows["xp_wrapped"][6], "header")
+        self.assertEqual(rows["xp_unused"][:4],
+                         ["unused", "xp_unused", "vmlinux", "kernel/x.c:9"])
+
+    def test_3_export_check(self):
+        x = os.path.join(self.root, "kernel/x.c")
+        text = slurp(x).replace("EXPORT_SYMBOL_GPL(xp_needed);\n", "")
+        text = text.replace("EXPORT_SYMBOL(xp_builtin);\n", "")
+        with open(x, "w") as f:
+            f.write(text + "EXPORT_SYMBOL(xp_new);\n")
+        with open(os.path.join(self.root, "drivers/a/a.c"), "w") as f:
+            f.write("int xp_needed(void);\nint xp_lost(void);\n"
+                    "int a(void) { return xp_needed(); }\n")
+        git(self.root, "commit", "-qam", "patch")
+        try:
+            r = self.run_kunused("export-check", "-v", "-b", self.build)
+        finally:
+            git(self.root, "reset", "-q", "--hard", "HEAD~1")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertNotIn("not look applied", r.stderr)
+        got = {re.match(r"(\w+): (\w+):", l).group(2):
+               l.split(":", 1)[0] for l in r.stdout.splitlines()
+               if re.match(r"\w+: \w+:", l)}
+        self.assertEqual(got, {"xp_new": "WARNING", "xp_needed": "ERROR",
+                               "xp_builtin": "ok", "xp_lost": "NOTE"})
+        self.assertIn("kernel/user.c:3", r.stdout)
+        self.assertIn("drivers/a/a (imports it)", r.stdout)
+        self.assertIn("export at kernel/x.c:4 can go; nothing else uses "
+                      "it", r.stdout)
+
+    def test_4_report(self):
+        cands = os.path.join(self.tmp.name, "c.tsv")
+        page = os.path.join(self.tmp.name, "r.html")
+        r = self.run_kunused("scan", "-o", cands)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.run_kunused("report", cands, "--exports", self.build, "-o",
+                             page)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("3 exports no module imports in Linux/x86 7.0.0: "
+                      "2 unexport, 1 unused", r.stdout)
+        text = slurp(page)
+        self.assertIn('<a href="#exports">Unneeded exports', text)
+        self.assertIn('data-xstatus="unused" data-xmacro='
+                      '"EXPORT_SYMBOL_NS_GPL"', text)
+        self.assertIn('data-xstatus="unexport" data-xmacro="EXPORT_SYMBOL" '
+                      'data-xcheck="check" data-xowner="vmlinux" '
+                      'data-xtags="header"', text)
+        self.assertIn("no compiled file uses it, only headers", text)
+        self.assertIn('data-xcheck="verified" data-xowner="vmlinux" '
+                      'data-xtags="" style="--c:#0969da"><td class="loc">'
+                      'kernel/x.c:7', text)
+        self.assertIn("not cross-checked with a build", text)
+        self.assertIn("<code>kernel/user.c:3</code>", text)
+
+    def test_export_check(self):
+        import exports
+        from report import export_check
+        built = {"k/a.c", "k/b.c"}
+        verify = {"confirmed": {"a"}, "real_use": {"b": ["k/b.c:4", "b()"]}}
+
+        def mk(name, status, site="k/a.c:1", uses=()):
+            return exports.Unneeded(name, status, "vmlinux",
+                                    [(site, "EXPORT_SYMBOL")], list(uses),
+                                    ["x86"], [], built)
+
+        self.assertEqual(export_check(mk("a", "unused"), verify),
+                         ("verified", ""))
+        c = mk("b", "unused")
+        self.assertEqual(export_check(c, verify),
+                         ("verified", "the build saw a use at k/b.c:4"))
+        self.assertEqual(c.status, "unexport")
+        self.assertEqual(export_check(mk("c", "unused"), verify)[0], "check")
+        self.assertEqual(export_check(mk("a", "unused", "k/z.c:1"),
+                                      verify)[0], "check")
+        self.assertEqual(export_check(mk("d", "unexport", uses=[
+            ("k/b.c", 3, "d();")]), None), ("verified", ""))
+        self.assertEqual(export_check(mk("d", "unexport", uses=[
+            ("k/x.h", 3, "d();")]), None)[0], "check")
+
+    def test_parse_diff(self):
+        import exports
+        got = exports.parse_diff(
+            "--- a/f.c\n+++ b/f.c\n@@ -1,3 +1,3 @@\n a\n--- b\n+c\n d\n"
+            "--- a/g.c\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n")
+        self.assertEqual(got, {"f.c": ([(2, "c")], ["-- b"]),
+                               "g.c": ([], ["x"])})
 
 
 if __name__ == "__main__":

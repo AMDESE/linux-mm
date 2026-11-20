@@ -96,7 +96,7 @@ DECL_PREFIX = r"[A-Za-z_][\w \t*]*?"
 def _patterns(name):
     n = re.escape(name)
     return (
-        re.compile(rf"EXPORT_SYMBOL\w*\(\s*{n}\s*\)"),
+        re.compile(rf"EXPORT_SYMBOL\w*\(\s*{n}\s*[,)]"),
         re.compile(rf"\s*#\s*(if|ifdef|ifndef|elif|undef|define\s+{n}\b)"),
         re.compile(rf"[ \t]*(?!{KEYWORDS})(?:extern\s+)?{DECL_PREFIX}"
                    rf"\b{n}\s*\([^;{{]*\)?\s*;?$"),

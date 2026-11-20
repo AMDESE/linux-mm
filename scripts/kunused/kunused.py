@@ -14,12 +14,14 @@ import os
 import re
 import sys
 
+import exports
 import externs
 import pastes
 import pipeline
 import verify
 from candidates import (TAGS, print_listing, read_tsv, summary, tsv_commit,
                         write_tsv)
+from maintainers import Maintainers
 from pipeline import git_out, tree_commit
 from report import Report
 from source import Index, tree_files
@@ -90,6 +92,44 @@ def cmd_check(args):
     print(f"-> {args.output}")
 
 
+def cmd_exports(args):
+    data = exports.load(args.sources, args.jobs)
+    if args.save:
+        if len(data) != 1:
+            sys.exit("kunused: --save takes exactly one BUILD_DIR")
+        with open(args.save, "w") as f:
+            json.dump(data[0], f)
+        print(f"kunused: saved {data[0]['build']} -> {args.save}",
+              file=sys.stderr)
+    builds = exports.Builds(data)
+    maint = Maintainers()
+    cands = exports.filtered(exports.find(builds, args.jobs), args.filter,
+                             maint)
+    if args.output:
+        with open(args.output, "w") as f:
+            exports.write_tsv(cands, f)
+        print(f"{len(cands)} exports -> {args.output}")
+    else:
+        exports.print_unneeded(cands, builds, maint, args.all)
+
+
+def cmd_export_check(args):
+    text = exports.read_patch(args.patch)
+    if not exports.parse_diff(text):
+        sys.exit(f"kunused: no diff in {args.patch}")
+    if not exports.is_applied(text):
+        print("kunused: the patch does not look applied here; uses are "
+              "counted in the tree as it is", file=sys.stderr)
+    builds = exports.Builds(exports.load(args.builds, args.jobs))
+    found = exports.check_patch(builds, text, args.jobs)
+    for level, msg in found:
+        if level != "ok" or args.verbose:
+            print(f"{level}: {msg}")
+    print(f"checked against {', '.join(sorted(set(builds.names)))}")
+    if any(level == "ERROR" for level, _ in found):
+        sys.exit(1)
+
+
 def cmd_paste(args):
     pastes.explain(Index(tree_files(), args.jobs), args.names, args.jobs)
 
@@ -110,7 +150,19 @@ def cmd_report(args):
     if not os.path.exists("MAINTAINERS"):
         print("kunused: no MAINTAINERS here, everything lands in THE REST;"
               " run in the kernel tree or pass -C", file=sys.stderr)
-    rep = Report(list(read_tsv(args.candidates)), ver, args.filter)
+    unneeded, names = None, ()
+    if args.exports:
+        data = exports.load(args.exports, args.jobs)
+        scanned = tsv_commit(args.candidates)
+        for d in data:
+            if scanned and d.get("commit") and scanned != d["commit"]:
+                sys.exit(f"kunused: {args.candidates} was scanned at "
+                         f"{scanned[:12]} but {d['build']} exports are of "
+                         f"{d['commit'][:12]}")
+        builds = exports.Builds(data)
+        unneeded, names = exports.find(builds, args.jobs), builds.names
+    rep = Report(list(read_tsv(args.candidates)), ver, args.filter,
+                 exports=unneeded, export_builds=names)
     with open(args.output, "w") as f:
         f.write(rep.html())
     if args.tsv:
@@ -207,6 +259,9 @@ def parser():
                    help="output of 'check' or verify.json from 'run'; "
                    "repeat it to combine builds of other architectures "
                    "or configs")
+    p.add_argument("--exports", action="append", metavar="BUILD_DIR|JSON",
+                   help="also list exports no module imports, as "
+                   "'exports' does, on a tab of their own (repeatable)")
     p.add_argument("--filter", action="append", default=[], metavar="RE",
                    help="only keep candidates whose path, MAINTAINERS "
                    "section or list matches (repeatable)")
@@ -223,16 +278,69 @@ def parser():
                        "its uses across the whole tree pass.")
     p.add_argument("names", nargs="+", metavar="NAME")
     p.set_defaults(func=cmd_paste)
+
+    p = sub.add_parser(
+        "exports", help="list exports that no module imports",
+        description="Read what each build exports and what its modules "
+        "import, and list\nthe exports no module of any build imports: "
+        "'unexport' when the tree\nstill uses the symbol, 'unused' when "
+        "nothing does.  Give one\nallmodconfig build per architecture "
+        "(see README).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="tags:\n"
+        "  [no-site]     no EXPORT_SYMBOL*(name) line in the tree: a macro "
+        "or a\n                generated file exports it (hidden without "
+        "--all)\n"
+        "  [header]      used from a header, maybe by an inline a module "
+        "could call\n"
+        "  [some-builds] not exported in every build given")
+    p.add_argument("sources", nargs="+", metavar="BUILD_DIR|JSON",
+                   help="an O= directory with a finished build, or a file "
+                   "written by --save")
+    p.add_argument("--save", metavar="FILE",
+                   help="also save what the build exports and imports, to "
+                   "reuse after the build is gone (one BUILD_DIR only)")
+    p.add_argument("--filter", action="append", default=[], metavar="RE",
+                   help="only keep exports whose path, module, MAINTAINERS "
+                   "section or list matches (repeatable)")
+    p.add_argument("--all", action="store_true",
+                   help="also list [no-site] exports")
+    p.add_argument("-o", "--output", metavar="FILE",
+                   help="write a TSV file instead of listing them")
+    p.set_defaults(func=cmd_exports)
+
+    p = sub.add_parser(
+        "export-check", help="check the exports a patch adds or removes",
+        description="For each export a patch adds or removes, say whether "
+        "a module uses\nthe symbol, and flag exports whose last module user "
+        "the patch removes.\nRun it on a tree with the patch applied.  "
+        "Exits with 1 if a removed\nexport is still needed.",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("patch", nargs="?", default="HEAD",
+                   metavar="PATCH|REV",
+                   help="a patch file, '-' for stdin, or a git revision or "
+                   "range (default: %(default)s)")
+    p.add_argument("-b", "--build", dest="builds", action="append",
+                   required=True, metavar="BUILD_DIR|JSON",
+                   help="a build or saved file, as for 'exports' "
+                   "(repeatable)")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="also show the exports that are fine")
+    p.set_defaults(func=cmd_export_check)
     return ap
 
 
 def main(argv=None):
     args = parser().parse_args(argv)
-    for a in ("candidates", "worktree", "build", "log", "output", "tsv"):
+    for a in ("candidates", "worktree", "build", "log", "output", "tsv",
+              "save"):
         if getattr(args, a, None):
             setattr(args, a, os.path.abspath(getattr(args, a)))
-    if getattr(args, "verify", None):
-        args.verify = [os.path.abspath(v) for v in args.verify]
+    for a in ("verify", "sources", "builds", "exports"):
+        if getattr(args, a, None):
+            setattr(args, a, [os.path.abspath(v) for v in getattr(args, a)])
+    if getattr(args, "patch", "-") != "-" and os.path.isfile(args.patch):
+        args.patch = os.path.abspath(args.patch)
     if getattr(args, "config", None) and os.path.isfile(args.config):
         args.config = os.path.abspath(args.config)
     if args.tree:

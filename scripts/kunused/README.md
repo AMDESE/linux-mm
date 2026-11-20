@@ -119,6 +119,8 @@ kunused scan --all                 # include [paste?], [non-c?], [uapi]
 kunused scan -o cands.tsv          # save everything for later steps
 kunused list cands.tsv '^fs/'      # list from a saved file
 kunused report cands.tsv           # HTML report, see below
+kunused exports ../build           # exports no module needs, see below
+kunused export-check -b ../build   # the same, for the patch at HEAD
 ```
 
 A whole-tree scan takes about two minutes on 128 CPUs. Each candidate
@@ -335,6 +337,87 @@ kunused report ../kunused-out/candidates.tsv \
 
 A candidate is verified when at least one build compiled it and no build
 saw a use. Both runs have to be of the same commit; `report` checks.
+
+## Exports no module needs
+
+An `EXPORT_SYMBOL*()` is only needed while some module links against the
+symbol. Built-in callers don't need it, so a function can be used and
+still carry an export nothing needs. `exports` finds those from a
+finished build with `CONFIG_MODULES=y`:
+
+```
+kunused exports ../build-x86 --save x86.json      # read a build, keep it
+kunused exports x86.json arm64.json --filter '^mm/'
+kunused exports x86.json -o exports.tsv           # everything, as TSV
+kunused report cands.tsv --verify verify.json --exports x86.json
+```
+
+With `--exports`, the HTML report gets an "Unneeded exports" tab. You
+can filter it by status, export macro (`EXPORT_SYMBOL`, `_GPL`, `_NS`,
+`_NS_GPL`), build check, where the symbol is defined (vmlinux or a
+module) and tag. The scan and the exports must be of the same commit;
+`report` checks.
+
+The build check says whether a build settled the row. An export is
+build-verified when a build compiled its export line and, for unexport,
+a compiled `.c` or `.S` file uses the symbol, or, for unused, the
+`--verify` cross-check saw no use. A use that cross-check saw turns an
+unused export into unexport. Every other row is "check by hand", and its
+note says why: the export line is in a file no build compiled, only
+headers use the symbol, or the cross-check did not cover it.
+
+Each export leaves an `__export_symbol_<name>` marker in the object that
+defines it (`include/linux/export.h`). Each module object lists what it
+imports as undefined symbols, and `symbol_get()` keeps the names it
+looks up in a `.no_trim_symbol` section. An export no module of any given
+build imports is listed as:
+
+- `unexport`: the tree still uses the symbol, so only the
+  `EXPORT_SYMBOL` line goes.
+- `unused`: nothing uses it, so the symbol goes too, as for `scan`.
+
+Use allmodconfig: every tristate user is a module there, so a symbol a
+module could use is imported by one. Modules that only build on other
+architectures (powerpc KVM, arm64 drivers) need a build of each, so give
+`exports` one allmodconfig build per architecture before sending
+patches. `--save` keeps what a build exports and imports in a JSON file
+of about 30 MB, so the build directory can go. Rust modules count only
+in builds with `CONFIG_RUST=y`.
+
+`[no-site]` exports have no `EXPORT_SYMBOL*(name)` line in the tree,
+because a macro (`EXPORT_TRACEPOINT_SYMBOL()`, the retpoline thunks) or
+a generated file exports them; they are hidden without `--all`.
+`[header]` ones are used from a header, often by an inline wrapper: if a
+module of another config calls that wrapper, it imports the symbol too.
+
+### Checking a patch
+
+`export-check` answers the same question for just the symbols a patch
+touches. Run it on a tree with the patch applied, as `checkpatch.pl -g`
+would be:
+
+```
+kunused export-check -b x86.json -b arm64.json             # HEAD
+kunused export-check -b x86.json HEAD~3..HEAD
+kunused export-check -b x86.json 0001-foo.patch            # or - for stdin
+```
+
+It reports:
+
+- `WARNING` for an added export no module uses, with the built-in
+  users, or that nothing uses it at all.
+- `ERROR` for a removed export some module still uses, with the
+  modules; the exit status is then 1.
+- `NOTE` for an export whose last module user the patch removes: the
+  `EXPORT_SYMBOL` line can go too.
+- `CHECK` when no module in the builds uses the symbol, but a header,
+  Rust code or a file no build compiled does.
+
+A module counts as a user when the build says it imports the symbol, or
+when one of its sources (from the build's `.mod` files) names the symbol
+in the patched tree. Code the patch adds to existing modules is
+therefore seen even if the build predates the patch. A new file belongs
+to no module until a build compiles it, so it shows up under `CHECK`.
 
 ## How accurate is it?
 
